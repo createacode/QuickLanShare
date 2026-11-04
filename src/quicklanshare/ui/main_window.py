@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import contextlib
 import logging
+import subprocess
+import sys
 import time
 from pathlib import Path
 from typing import Any
@@ -19,6 +21,7 @@ from PySide6.QtCore import QEasingCurve, QObject, QRect, QSize, Qt, QTimer, QUrl
 from PySide6.QtGui import QAction, QCloseEvent, QDesktopServices, QGuiApplication
 from PySide6.QtWidgets import (
     QApplication,
+    QCheckBox,
     QFileDialog,
     QFrame,
     QHBoxLayout,
@@ -36,8 +39,11 @@ from PySide6.QtWidgets import (
 )
 
 from ..core.version import __software_name__, __version__, window_title
+from ..services.autostart import AutostartError, apply_autostart
 from ..services.config import Config
+from ..services.download_registry import DownloadRegistry
 from ..utils.app_config import AppConfig, apply_window_geometry, save_config
+from ..utils.downloads import desktop_dir, resolve_download_dir, unique_download_path
 from ..utils.format import human_size, human_time
 from ..utils.logging_setup import LoggingSession, set_log_level
 from ..utils.paths import app_base_dir, default_data_dir
@@ -46,6 +52,7 @@ from .about_dialog import AboutDialog
 from .backend import Backend
 from .connection_popup import ConnectionPopup
 from .logs_drawer import LogsDrawer
+from .qr_overlay import QrButton, QrOverlay, QrPeek, qr_pixmap
 from .settings_dialog import SettingsDialog
 from .text_panel import TextPanel
 from .widgets import (
@@ -88,6 +95,7 @@ class MainWindow(QMainWindow):
         data_dir: Path | None = None,
         *,
         autostart: bool = True,
+        start_hidden: bool = False,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
@@ -103,11 +111,17 @@ class MainWindow(QMainWindow):
         self._tray_available = False
         self._skeleton_started = 0.0
         self._pending_files: list[dict[str, Any]] | None = None
+        self._local_url = ""
         self._empty_mode = "empty"
         self._fade_animation: Any = None
         self._log_handler: _QtLogHandler | None = None
         self._log_emitter = _LogEmitter(self)
         self._autostart = autostart
+        self._start_hidden = start_hidden
+        self._downloading: set[str] = set()
+        self._pending_downloads: dict[str, Path] = {}
+        self._download_registry = DownloadRegistry(self._data_dir / "state" / "downloads.json")
+        self._downloaded: dict[str, Path] = self._download_registry.all()
 
         self.backend = Backend(self)
         self._build_ui()
@@ -187,6 +201,8 @@ class MainWindow(QMainWindow):
 
         self.toast = Toast(self)
         self.connection_popup = ConnectionPopup(self)
+        self.qr_peek = QrPeek(self)
+        self.qr_overlay = QrOverlay(self)
         self.log_drawer = LogsDrawer(self)
         self.log_panel = self.log_drawer.panel
 
@@ -237,6 +253,10 @@ class MainWindow(QMainWindow):
         self.address_button.setMaximumWidth(280)
         self.address_button.setToolTip("查看二维码与连接信息")
         layout.addWidget(self.address_button)
+
+        self.qr_button = QrButton()
+        self.qr_button.setEnabled(False)
+        layout.addWidget(self.qr_button)
         layout.addStretch(1)
 
         self.open_web_button = QPushButton("打开网页")
@@ -320,17 +340,30 @@ class MainWindow(QMainWindow):
         self.refresh_button.setProperty("role", "refresh")
         self.refresh_button.setCursor(Qt.CursorShape.PointingHandCursor)
         header.addWidget(self.refresh_button)
+        files_layout.addLayout(header)
+
+        toolbar = QHBoxLayout()
+        toolbar.setSpacing(8)
+        self.select_all_checkbox = QCheckBox("全选")
+        self.select_all_checkbox.setTristate(True)
+        self.select_all_checkbox.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.select_all_checkbox.setToolTip("选中当前列表中的全部文件")
+        toolbar.addWidget(self.select_all_checkbox)
+        self.download_summary = QLabel("已下载 0 · 未下载 0")
+        self.download_summary.setObjectName("Muted")
+        toolbar.addWidget(self.download_summary)
+        toolbar.addStretch(1)
         self.zip_button = QPushButton("打包下载")
         self.zip_button.setProperty("role", "soft")
         self.zip_button.setCursor(Qt.CursorShape.PointingHandCursor)
         self.zip_button.setEnabled(False)
-        header.addWidget(self.zip_button)
+        toolbar.addWidget(self.zip_button)
         self.delete_button = QPushButton("删除所选")
         self.delete_button.setProperty("role", "danger")
         self.delete_button.setCursor(Qt.CursorShape.PointingHandCursor)
         self.delete_button.setEnabled(False)
-        header.addWidget(self.delete_button)
-        files_layout.addLayout(header)
+        toolbar.addWidget(self.delete_button)
+        files_layout.addLayout(toolbar)
 
         self.file_stack = QStackedWidget()
         self.file_stack.setMinimumHeight(220)
@@ -357,7 +390,7 @@ class MainWindow(QMainWindow):
         self.data_button = QPushButton("数据目录")
         self.data_button.setProperty("role", "link")
         self.data_button.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.data_button.setToolTip(str(self._data_dir))
+        self.data_button.setToolTip(str(self._data_dir / "uploads"))
         layout.addWidget(self.data_button)
         layout.addWidget(self._dot())
         self.status_online = QLabel("在线 0")
@@ -403,7 +436,9 @@ class MainWindow(QMainWindow):
         self.file_table.downloadRequested.connect(self.save_download)
         self.file_table.deleteRequested.connect(self.delete_files)
         self.file_table.copyLinkRequested.connect(self.copy_file_link)
+        self.file_table.openFolderRequested.connect(self.open_download_folder)
         self.file_table.selectionCountChanged.connect(self._on_selection_changed)
+        self.select_all_checkbox.stateChanged.connect(self._on_select_all_changed)
         self.refresh_button.clicked.connect(lambda: self.load_files(show_skeleton=False))
         self.zip_button.clicked.connect(self.download_zip)
         self.delete_button.clicked.connect(
@@ -418,6 +453,8 @@ class MainWindow(QMainWindow):
         self.settings_button.clicked.connect(self.open_settings)
         self.connection_popup.copyRequested.connect(self.copy_share_url)
         self.connection_popup.openWebRequested.connect(self.open_web)
+        self.qr_button.clicked.connect(self._show_qr_overlay)
+        self.qr_button.hoverChanged.connect(self._on_qr_hover)
         self.transfer_panel.cancelRequested.connect(self.backend.cancel_transfer)
         self.log_drawer.panel.openLogDirRequested.connect(self.open_log_dir)
         self.log_drawer.visibilityChanged.connect(self._on_log_drawer_visibility)
@@ -438,10 +475,10 @@ class MainWindow(QMainWindow):
         self.backend.auto_shutdown_changed.connect(self._on_auto_shutdown_changed)
         self.backend.upload_started.connect(self._on_upload_started)
         self.backend.upload_progress.connect(self.transfer_panel.update_task)
-        self.backend.upload_finished.connect(self._on_transfer_finished)
+        self.backend.upload_finished.connect(self._on_upload_finished)
         self.backend.download_started.connect(self._on_download_started)
         self.backend.download_progress.connect(self.transfer_panel.update_task)
-        self.backend.download_finished.connect(self._on_transfer_finished)
+        self.backend.download_finished.connect(self._on_download_finished)
         self.backend.chat_history.connect(self.text_panel.set_history)
         self.backend.chat_message.connect(self.text_panel.append_message)
         self.backend.chat_deleted.connect(self.text_panel.remove_message)
@@ -513,7 +550,8 @@ class MainWindow(QMainWindow):
             self._on_start_failed(str(exc))
             return
         self._data_dir = config.data_dir
-        self.data_button.setToolTip(str(self._data_dir))
+        self._set_download_registry()
+        self.data_button.setToolTip(str(self._data_dir / "uploads"))
         if config.fallback_reason:
             logger.warning(config.fallback_reason)
             self.toast.show_message(config.fallback_reason, duration=4200)
@@ -530,21 +568,43 @@ class MainWindow(QMainWindow):
             auto_shutdown_hours=server.auto_shutdown_hours,
             open_browser=False,
             log_level=self.app_config.ui.log_level,
+            ip_scope=self.app_config.server.ip_scope,
         )
         config.ensure_dirs()
         return config
 
+    def _set_download_registry(self) -> None:
+        path = self._data_dir / "state" / "downloads.json"
+        if path == self._download_registry.path:
+            return
+        self._download_registry = DownloadRegistry(path)
+        self._downloaded = self._download_registry.all()
+
+    def _download_dir(self) -> Path:
+        return resolve_download_dir(self.app_config.ui.download_dir)
+
     def _on_started(self, port: int, share_url: str, deadline: float) -> None:
         self._share_url = share_url
+        self._local_url = f"http://127.0.0.1:{port}"
         self._deadline = deadline
         self.address_button.setText(self._address_text(share_url))
         self.address_button.setToolTip(share_url)
         self.connection_popup.set_info(share_url, f"http://127.0.0.1:{port}", 0)
+        self.qr_button.setIcon(qr_pixmap(share_url, 22))
+        self.qr_button.setEnabled(True)
+        self.qr_button.setToolTip("")
         self._set_running(True)
         self._set_status("ok", "运行中")
         self.text_panel.set_service_available(True)
         logger.info("服务已就绪：%s", share_url)
         self.toast.show_message("服务已启动，局域网内可扫码访问")
+        if self._start_hidden and self._tray_available:
+            self.tray.showMessage(
+                __software_name__,
+                "已在后台运行，双击托盘图标打开主界面。",
+                QSystemTrayIcon.MessageIcon.Information,
+                3000,
+            )
         self.load_files(show_skeleton=True)
         self.backend.refresh_room_info()
         if self.app_config.server.open_browser:
@@ -554,6 +614,9 @@ class MainWindow(QMainWindow):
         self._set_running(False)
         self._set_status("error", "启动失败")
         self.text_panel.set_service_available(False)
+        self.qr_button.setEnabled(False)
+        self.qr_peek.hide()
+        self.qr_overlay.close_overlay()
         self._set_empty_state(
             "服务启动失败",
             message,
@@ -569,8 +632,13 @@ class MainWindow(QMainWindow):
     def _on_stopped(self, reason: str) -> None:
         self._deadline = 0.0
         self._share_url = ""
+        self._local_url = ""
         self._set_running(False)
         self.text_panel.set_service_available(False)
+        self.qr_button.setEnabled(False)
+        self.qr_button.setToolTip("")
+        self.qr_peek.hide()
+        self.qr_overlay.close_overlay()
         self.address_button.setText("服务未启动")
         self.address_button.setToolTip("服务未启动")
         self.connection_popup.clear()
@@ -665,6 +733,14 @@ class MainWindow(QMainWindow):
         self._save_settings()
         set_log_level(updated.ui.log_level)
         logger.info("设置已保存")
+        try:
+            apply_autostart(updated.ui.autostart, updated.ui.autostart_silent)
+        except AutostartError as exc:
+            logger.warning("设置开机自启失败: %s", exc)
+            self.toast.show_message(str(exc), duration=4200)
+            updated.ui.autostart = False
+            updated.ui.autostart_silent = False
+            self._save_settings()
         port_changed = previous.server.port != updated.server.port
         if port_changed:
             if self.backend.is_running:
@@ -724,8 +800,10 @@ class MainWindow(QMainWindow):
 
     def _apply_files(self, files: list[dict[str, Any]]) -> None:
         self._files = files
+        self._downloaded = self._download_registry.all()
         self.skeleton.stop()
-        self.file_table.set_files(files)
+        self.file_table.set_files(files, self._downloaded, self._downloading)
+        self._refresh_download_summary()
         self.file_count_label.setText(f"共 {len(files)} 个")
         if files:
             self.file_stack.setCurrentWidget(self.file_table)
@@ -739,7 +817,34 @@ class MainWindow(QMainWindow):
             )
             self.file_stack.setCurrentWidget(self.empty_state)
             self._fade_in(self.empty_state)
-        self._on_selection_changed(len(self.file_table.selected_names()))
+        self._update_select_all_state()
+        self._on_selection_changed(self.file_table.checked_count())
+
+    def _refresh_download_summary(self) -> None:
+        total = len(self._files)
+        downloading = sum(1 for item in self._files if str(item.get("name")) in self._downloading)
+        downloaded = sum(
+            1
+            for item in self._files
+            if str(item.get("name")) in self._downloaded
+            and str(item.get("name")) not in self._downloading
+        )
+        pending = max(0, total - downloaded - downloading)
+        text = f"已下载 {downloaded}"
+        if downloading:
+            text += f" · 下载中 {downloading}"
+        text += f" · 未下载 {pending}"
+        self.download_summary.setText(text)
+
+    def _on_select_all_changed(self, state: int) -> None:
+        self.file_table.set_all_checked(state != int(Qt.CheckState.Unchecked.value))
+
+    def _update_select_all_state(self) -> None:
+        if not hasattr(self, "select_all_checkbox"):
+            return
+        self.select_all_checkbox.blockSignals(True)
+        self.select_all_checkbox.setCheckState(self.file_table.check_all_state())
+        self.select_all_checkbox.blockSignals(False)
 
     def _on_files_failed(self, message: str) -> None:
         self.skeleton.stop()
@@ -777,14 +882,14 @@ class MainWindow(QMainWindow):
 
     def _on_selection_changed(self, count: int) -> None:
         self.delete_button.setEnabled(count > 0 and self.backend.is_running)
-        if self.backend.is_running:
-            self.zip_button.setEnabled(bool(self._files))
+        self.zip_button.setEnabled(count > 0 and self.backend.is_running)
+        self._update_select_all_state()
 
     def choose_files(self) -> None:
         if not self.backend.is_running:
             self.toast.show_message("服务未运行，请先启动服务", duration=2400)
             return
-        paths, _ = QFileDialog.getOpenFileNames(self, "选择要共享的文件")
+        paths, _ = QFileDialog.getOpenFileNames(self, "选择要共享的文件", str(desktop_dir()))
         if paths:
             self.upload_paths(paths)
 
@@ -802,30 +907,35 @@ class MainWindow(QMainWindow):
         if not self.backend.is_running:
             self.toast.show_message("服务未运行，无法下载", duration=2400)
             return
-        target, _ = QFileDialog.getSaveFileName(self, "保存文件", str(downloads_dir() / name))
-        if not target:
+        try:
+            target = unique_download_path(self._download_dir(), name)
+        except OSError as exc:
+            self.toast.show_message(f"无法创建下载目录：{exc}", duration=3600)
             return
         logger.info("下载文件 %s -> %s", name, target)
-        self.backend.download_file(name, Path(target))
+        self._pending_downloads[name] = target
+        self._downloading.add(name)
+        self._apply_files(self._files)
+        self.toast.show_message(f"开始下载到 {target.parent}", duration=2800)
+        self.backend.download_file(name, target)
 
     def download_zip(self) -> None:
         if not self.backend.is_running:
             self.toast.show_message("服务未运行，无法下载", duration=2400)
             return
-        names = self.file_table.selected_names()
+        names = self.file_table.checked_names()
         if not names:
-            names = [str(item.get("name")) for item in self._files if item.get("name")]
-        if not names:
-            self.toast.show_message("没有可打包的文件", duration=2400)
+            self.toast.show_message("请先勾选要打包的文件", duration=2400)
             return
         default_name = f"QuickLanShare_{time.strftime('%Y%m%d_%H%M%S')}.zip"
-        target, _ = QFileDialog.getSaveFileName(
-            self, "打包下载", str(downloads_dir() / default_name), "ZIP 压缩包 (*.zip)"
-        )
-        if not target:
+        try:
+            target = unique_download_path(self._download_dir(), default_name)
+        except OSError as exc:
+            self.toast.show_message(f"无法创建下载目录：{exc}", duration=3600)
             return
-        logger.info("打包下载 %d 个文件", len(names))
-        self.backend.download_zip(names, Path(target))
+        logger.info("打包下载 %d 个文件 -> %s", len(names), target)
+        self.toast.show_message(f"开始打包下载到 {target.parent}", duration=2800)
+        self.backend.download_zip(names, target)
 
     def delete_files(self, names: list[str]) -> None:
         if not names:
@@ -843,6 +953,23 @@ class MainWindow(QMainWindow):
             return
         logger.info("请求删除 %d 个文件", len(names))
         self.backend.delete_files(names)
+
+    def open_download_folder(self, name: str) -> None:
+        path = self._download_registry.get(name)
+        if path is None:
+            self.toast.show_message("本地文件不存在，可能已被移动或删除", duration=3000)
+            self._downloaded = self._download_registry.all()
+            self._apply_files(self._files)
+            return
+        try:
+            if sys.platform == "win32":
+                # /select, 后必须把完整路径作为带引号参数，文件名含空格才不会解析错。
+                subprocess.Popen(f'explorer /select,"{path}"', close_fds=True)
+            else:
+                QDesktopServices.openUrl(QUrl.fromLocalFile(str(path.parent)))
+        except OSError:
+            logger.warning("打开文件位置失败: %s", path)
+            QDesktopServices.openUrl(QUrl.fromLocalFile(str(path.parent)))
 
     def copy_share_url(self) -> None:
         url = self._share_url or self.backend.share_url
@@ -877,16 +1004,33 @@ class MainWindow(QMainWindow):
         elif message and message != "已取消":
             self.toast.show_message(f"{name or '传输'}：{message}", duration=3600)
             logger.warning("传输失败 %s: %s", name, message)
+
+    def _on_upload_finished(self, task_id: str, name: str, ok: bool, message: str) -> None:
+        self._on_transfer_finished(task_id, name, ok, message)
         if self.file_stack.currentWidget() is not self.skeleton:
             self.backend.refresh_files()
+
+    def _on_download_finished(self, task_id: str, name: str, ok: bool, message: str) -> None:
+        self._on_transfer_finished(task_id, name, ok, message)
+        target = self._pending_downloads.pop(name, None)
+        self._downloading.discard(name)
+        if target is not None:
+            if ok:
+                self._download_registry.record(name, target)
+                self._downloaded = self._download_registry.all()
+                logger.info("本地下载完成: %s -> %s", name, target)
+            self._apply_files(self._files)
+        else:
+            self._apply_files(self._files)
 
     # ================================================================ statuses
     def _set_running(self, running: bool) -> None:
         self.drop_zone.setEnabled(running)
         self.open_web_button.setEnabled(running)
         self.refresh_button.setEnabled(running)
-        self.zip_button.setEnabled(running and bool(self._files))
-        self.delete_button.setEnabled(running and bool(self.file_table.selected_names()))
+        checked = self.file_table.checked_count()
+        self.zip_button.setEnabled(running and checked > 0)
+        self.delete_button.setEnabled(running and checked > 0)
         self.power_button.setEnabled(True)
         if running:
             self.power_button.setIcon(icons.glyph_icon("power", size=15, color=theme.DANGER))
@@ -949,8 +1093,18 @@ class MainWindow(QMainWindow):
             logger.warning("服务端版本 %s 与界面版本 %s 不一致", version, __version__)
 
     def _on_delete_finished(self, deleted: list[Any], failed: list[Any]) -> None:
-        if deleted:
-            self.toast.show_message(f"已删除 {len(deleted)} 个文件")
+        deleted_names = [str(name) for name in deleted if isinstance(name, str)]
+        if deleted_names:
+            self._download_registry.remove(deleted_names)
+            self._downloaded = self._download_registry.all()
+            for name in deleted_names:
+                self._downloading.discard(name)
+                self._pending_downloads.pop(name, None)
+            self._files = [
+                item for item in self._files if str(item.get("name")) not in deleted_names
+            ]
+            self._apply_files(self._files)
+            self.toast.show_message(f"已删除 {len(deleted_names)} 个文件")
         if failed:
             self.toast.show_message(f"{len(failed)} 个文件删除失败", duration=3600)
             logger.warning("部分文件删除失败: %s", failed)
@@ -984,15 +1138,35 @@ class MainWindow(QMainWindow):
             return
         self.connection_popup.show_near(self.address_button)
 
-    def open_web(self) -> None:
+    def _on_qr_hover(self, hovered: bool) -> None:
+        if not hovered or not self.backend.is_running or self.qr_overlay.isVisible():
+            self.qr_peek.hide()
+            return
         url = self._share_url or self.backend.share_url
+        if not url:
+            return
+        self.qr_peek.set_url(url)
+        self.qr_peek.show_near(self.qr_button)
+
+    def _show_qr_overlay(self) -> None:
+        url = self._share_url or self.backend.share_url
+        if not url:
+            self.toast.show_message("服务尚未启动", duration=2200)
+            return
+        self.qr_peek.hide()
+        self.qr_overlay.show_for(url)
+
+    def open_web(self) -> None:
+        url = self._local_url or self._share_url or self.backend.share_url
         if not url:
             self.toast.show_message("服务尚未启动", duration=2200)
             return
         QDesktopServices.openUrl(QUrl(url))
 
     def open_data_dir(self) -> None:
-        QDesktopServices.openUrl(QUrl.fromLocalFile(str(self._data_dir)))
+        uploads = self._data_dir / "uploads"
+        uploads.mkdir(parents=True, exist_ok=True)
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(uploads)))
 
     def open_log_dir(self) -> None:
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(self.logging_session.log_dir)))
@@ -1011,9 +1185,14 @@ class MainWindow(QMainWindow):
             self._log_dot.show()
 
     def show_from_tray(self) -> None:
+        self._start_hidden = False
         self.showNormal()
         self.raise_()
         self.activateWindow()
+
+    @property
+    def tray_available(self) -> bool:
+        return self._tray_available
 
     def _on_tray_activated(self, reason: QSystemTrayIcon.ActivationReason) -> None:
         if reason in (
@@ -1046,6 +1225,10 @@ class MainWindow(QMainWindow):
         self.request_quit()
 
     def keyPressEvent(self, event: Any) -> None:
+        if event.key() == Qt.Key.Key_Escape and self.qr_overlay.isVisible():
+            self.qr_overlay.close_overlay()
+            event.accept()
+            return
         if event.key() == Qt.Key.Key_Escape and self.log_drawer.is_open:
             self.log_drawer.hide_drawer()
             event.accept()
@@ -1058,6 +1241,8 @@ class MainWindow(QMainWindow):
             self.toast.reposition()
         if getattr(self, "log_drawer", None) is not None:
             self.log_drawer.reposition()
+        if getattr(self, "qr_overlay", None) is not None and self.qr_overlay.isVisible():
+            self.qr_overlay.setGeometry(self.rect())
 
     def dragEnterEvent(self, event: Any) -> None:
         if event.mimeData().hasUrls():
@@ -1116,15 +1301,6 @@ class MainWindow(QMainWindow):
     @property
     def data_dir(self) -> Path:
         return self._data_dir
-
-
-def downloads_dir() -> Path:
-    """用户下载目录（不存在时回退到主目录）。"""
-    from PySide6.QtCore import QStandardPaths
-
-    location = QStandardPaths.writableLocation(QStandardPaths.StandardLocation.DownloadLocation)
-    path = Path(location) if location else Path.home() / "Downloads"
-    return path if path.exists() else Path.home()
 
 
 def run_window(

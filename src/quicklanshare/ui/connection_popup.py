@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import base64
 
-from PySide6.QtCore import QPoint, Qt, Signal
-from PySide6.QtGui import QGuiApplication, QPixmap
+from PySide6.QtCore import QPoint, QRectF, Qt, Signal
+from PySide6.QtGui import QColor, QGuiApplication, QPainter, QPainterPath, QPixmap
 from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
@@ -28,9 +28,9 @@ class ConnectionPopup(QFrame):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent, Qt.WindowType.Popup)
         self.setObjectName("Popup")
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self.setFrameShape(QFrame.Shape.NoFrame)
         self.setFixedWidth(320)
-        theme.add_shadow(self, blur=30, offset_y=8, alpha=28)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(18, 16, 18, 16)
@@ -81,6 +81,17 @@ class ConnectionPopup(QFrame):
     def _set_enabled(self, enabled: bool) -> None:
         self._copy.setEnabled(enabled)
         self._open.setEnabled(enabled)
+
+    def paintEvent(self, event: object) -> None:
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+        path = QPainterPath()
+        path.addRoundedRect(rect, 14, 14)
+        painter.fillPath(path, QColor(theme.SURFACE))
+        painter.setPen(QColor(theme.BORDER))
+        painter.drawPath(path)
+        painter.end()
 
     def set_info(self, share_url: str, local_url: str, online: int = 0) -> None:
         self._url.setText(share_url)

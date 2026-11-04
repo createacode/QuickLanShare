@@ -20,6 +20,7 @@ from .paths import ensure_directory, local_appdata_dir
 
 SCHEMA_VERSION = 1
 LOG_LEVELS = ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL")
+IP_SCOPES = ("last1", "last2", "last3", "all")
 MIN_PORT = 1
 MAX_PORT = 65535
 MIN_AUTO_SHUTDOWN_HOURS = 0.1
@@ -83,10 +84,14 @@ class ServerSettings:
     auto_shutdown_enabled: bool = True
     auto_shutdown_hours: float = 24.0
     open_browser: bool = False
+    ip_scope: str = "last1"
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> ServerSettings:
         default = cls()
+        scope = _safe_str(raw.get("ip_scope"), default.ip_scope)
+        if scope not in IP_SCOPES:
+            scope = default.ip_scope
         return cls(
             host=_safe_str(raw.get("host"), default.host),
             port=_clamp_int(raw.get("port"), 1, MAX_PORT, default.port),
@@ -100,6 +105,7 @@ class ServerSettings:
                 default.auto_shutdown_hours,
             ),
             open_browser=_safe_bool(raw.get("open_browser"), default.open_browser),
+            ip_scope=scope,
         )
 
 
@@ -109,8 +115,11 @@ class UiSettings:
     tray_hint_shown: bool = False
     log_level: str = "INFO"
     first_run: bool = True
-    column_widths: list[int] = field(default_factory=lambda: [420, 88, 148, 64, 80])
+    column_widths: list[int] = field(default_factory=lambda: [76, 108, 48, 72, 104])
     last_tab: int = 0
+    autostart: bool = False
+    autostart_silent: bool = False
+    download_dir: str = ""
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> UiSettings:
@@ -130,6 +139,9 @@ class UiSettings:
             first_run=_safe_bool(raw.get("first_run"), default.first_run),
             column_widths=clean_widths,
             last_tab=_clamp_int(raw.get("last_tab"), 0, 5, 0),
+            autostart=_safe_bool(raw.get("autostart"), default.autostart),
+            autostart_silent=_safe_bool(raw.get("autostart_silent"), default.autostart_silent),
+            download_dir=_safe_str(raw.get("download_dir"), "").strip(),
         )
 
 

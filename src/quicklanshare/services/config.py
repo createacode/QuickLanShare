@@ -30,7 +30,7 @@ class Config:
     fallback_reason: str | None = None
 
     # 传输限制（字节）
-    max_upload_size: int = 20 * GIB
+    max_upload_size: int = 25 * GIB
     zip_size_limit: int = 20 * GIB
     upload_chunk_size: int = 8 * MIB
     max_chunk_size: int = 32 * MIB
@@ -54,6 +54,7 @@ class Config:
     # 安全 / 网络
     allow_any_host: bool = False
     allowed_hosts: set[str] = field(default_factory=set)
+    ip_scope: str = "last1"
 
     # 杂项
     log_level: str = "INFO"

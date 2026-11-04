@@ -20,6 +20,7 @@ from aiohttp import WSMsgType, web
 from ..core.version import __author__, __copyright_ym__, __version__
 from ..utils.net import collect_local_hosts, get_local_ip, open_browser
 from ..utils.qr import qr_data_uri
+from .access import is_ip_allowed, is_loopback, normalize_ipv4
 from .chat import ChatStore, EmptyMessage, MessageTooLong
 from .config import APP_NAME, Config
 from .filenames import (
@@ -149,6 +150,7 @@ class FileTransferServer:
         handler: Callable[[web.Request], Awaitable[web.StreamResponse]],
     ) -> web.StreamResponse:
         self._check_host(request)
+        self._check_ip_scope(request)
         if request.method not in ("GET", "HEAD", "OPTIONS") or request.path == "/ws":
             self._check_origin(request)
         return await handler(request)
@@ -173,6 +175,26 @@ class FileTransferServer:
 
     def _error(self, message: str, status: int) -> web.Response:
         return web.json_response({"error": message}, status=status)
+
+    def _is_local_client(self, request: web.Request) -> bool:
+        return is_loopback(request.remote)
+
+    def _check_ip_scope(self, request: web.Request) -> None:
+        anchor = normalize_ipv4(request.url.host) or self.local_ip
+        if is_ip_allowed(anchor, request.remote, self.config.ip_scope):
+            return
+        logger.warning(
+            "拒绝不在放通范围的 IP: %s（本机 %s，范围 %s）",
+            request.remote,
+            anchor,
+            self.config.ip_scope,
+        )
+        raise web.HTTPForbidden(text="IP not allowed")
+
+    def _require_local_client(self, request: web.Request) -> None:
+        if not self._is_local_client(request):
+            logger.warning("拒绝非本机控制请求: %s %s", request.path, request.remote)
+            raise web.HTTPForbidden(text="Only local client can control shutdown")
 
     def _check_host(self, request: web.Request) -> None:
         if self.config.allow_any_host:
@@ -292,6 +314,7 @@ class FileTransferServer:
                 "copyright": f"Copyright © {__author__} {__copyright_ym__}",
                 "uptime": int(time.time() - self.started_at),
                 "active_downloads": self.active_downloads,
+                "local_client": self._is_local_client(request),
             }
         )
 
@@ -532,6 +555,7 @@ class FileTransferServer:
         return web.json_response(self._shutdown_status())
 
     async def handle_extend_auto_shutdown(self, request: web.Request) -> web.Response:
+        self._require_local_client(request)
         data = await self._read_json(request)
         hours = data.get("hours", self.config.auto_shutdown_extend_hours)
         try:
@@ -624,6 +648,7 @@ class FileTransferServer:
         self.request_stop(reason)
 
     async def handle_shutdown(self, request: web.Request) -> web.Response:
+        self._require_local_client(request)
         data = await self._read_json(request)
         if data.get("confirm") is not True:
             raise web.HTTPBadRequest(text="必须确认关闭")

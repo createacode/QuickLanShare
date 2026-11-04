@@ -284,6 +284,7 @@ class ServerBehaviourTests(ServerTestCase):
         self.assertEqual(data["version"], __version__)
         self.assertIn("qr_code", data)
         self.assertTrue(data["qr_code"].startswith("data:image/png;base64,"))
+        self.assertIs(data["local_client"], True)
 
     async def test_index_and_security_headers(self):
         async with self.session.get(self.base + "/") as response:

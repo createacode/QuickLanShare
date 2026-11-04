@@ -1,13 +1,17 @@
 from __future__ import annotations
 
 from pathlib import Path
+from unittest.mock import patch
 
-from PySide6.QtWidgets import QApplication, QDialog
+from PySide6.QtCore import QPoint, Qt
+from PySide6.QtTest import QTest
+from PySide6.QtWidgets import QApplication, QCheckBox, QDialog, QLabel, QPushButton
 
 from quicklanshare.core.version import window_title
 from quicklanshare.ui import theme
 from quicklanshare.ui.main_window import MainWindow
 from quicklanshare.ui.settings_dialog import SettingsDialog
+from quicklanshare.ui.widgets import FileTable
 from quicklanshare.utils.app_config import AppConfig
 from quicklanshare.utils.logging_setup import setup_logging
 
@@ -119,18 +123,152 @@ def test_settings_dialog_saves_values(tmp_path: Path, qtbot) -> None:
     window = make_window(tmp_path, qtbot)
     dialog = SettingsDialog(window.app_config, window)
     qtbot.addWidget(dialog)
+    assert dialog.height() <= 760
     dialog.port_spin.setValue(9123)
     dialog.browser_toggle.setChecked(True)
+    dialog.ip_scope_combo.setCurrentIndex(dialog.ip_scope_combo.findData("last2"))
     dialog.auto_toggle.setChecked(False)
     dialog.hours_spin.setValue(12.0)
     dialog.tray_toggle.setChecked(False)
     dialog.level_combo.setCurrentText("DEBUG")
+    dialog.autostart_toggle.setChecked(True)
+    assert not dialog.silent_row.isHidden()
+    dialog.silent_toggle.setChecked(True)
+    custom_downloads = tmp_path / "downloads_custom"
+    custom_downloads.mkdir()
+    with patch(
+        "quicklanshare.ui.settings_dialog.QFileDialog.getExistingDirectory",
+        return_value=str(custom_downloads),
+    ):
+        dialog.download_dir_button.click()
+    assert dialog.download_dir_edit.text() == str(custom_downloads)
     dialog._on_save()
     assert dialog.result() == QDialog.DialogCode.Accepted
     assert dialog.result_config.server.port == 9123
     assert dialog.result_config.server.open_browser is True
+    assert dialog.result_config.server.ip_scope == "last2"
     assert dialog.result_config.server.auto_shutdown_enabled is False
     assert dialog.result_config.server.auto_shutdown_hours == 12.0
     assert dialog.result_config.ui.close_to_tray is False
     assert dialog.result_config.ui.log_level == "DEBUG"
+    assert dialog.result_config.ui.autostart is True
+    assert dialog.result_config.ui.autostart_silent is True
+    assert dialog.result_config.ui.download_dir == str(custom_downloads)
+    window.hide()
+
+
+def test_file_table_checkboxes_and_download_status(tmp_path: Path, qtbot) -> None:
+    table = FileTable()
+    qtbot.addWidget(table)
+    local = tmp_path / "a.txt"
+    local.write_text("data", encoding="utf-8")
+    files = [
+        {"name": "a.txt", "size": 4, "modified": 0, "download_count": 0},
+        {"name": "b.txt", "size": 8, "modified": 0, "download_count": 2},
+    ]
+    table.set_files(files, {"a.txt": local}, {"b.txt"})
+    assert table.rowCount() == 2
+    assert table.checked_count() == 0
+
+    table.set_all_checked(True)
+    assert table.checked_count() == 2
+    assert table.check_all_state() == Qt.CheckState.Checked
+
+    status_texts: list[str] = []
+    for row in range(table.rowCount()):
+        label = table.cellWidget(row, table.COL_STATUS).findChild(QLabel)
+        if label is not None:
+            status_texts.append(label.text())
+    assert "已下载" in status_texts
+    assert "下载中" in status_texts
+
+    folder_buttons = table.cellWidget(0, table.COL_ACTIONS).findChildren(QPushButton)
+    assert folder_buttons
+    with qtbot.waitSignal(table.openFolderRequested, timeout=2000):
+        folder_buttons[-1].click()
+
+    table.set_all_checked(False)
+    assert table.checked_count() == 0
+    first_box = table.cellWidget(0, table.COL_CHECK).findChild(QCheckBox)
+    assert first_box is not None
+    first_box.setChecked(True)
+    assert table.checked_count() == 1
+    assert table.check_all_state() == Qt.CheckState.PartiallyChecked
+
+
+def test_open_download_folder_quotes_spaces(tmp_path: Path, qtbot) -> None:
+    window = make_window(tmp_path, qtbot)
+    local = tmp_path / "新建 文本文档.txt"
+    local.write_text("data", encoding="utf-8")
+    window._download_registry.record(local.name, local)
+    window._downloaded = window._download_registry.all()
+    with patch("quicklanshare.ui.main_window.subprocess.Popen") as popen:
+        window.open_download_folder(local.name)
+    command = popen.call_args[0][0]
+    assert command.startswith("explorer /select,")
+    assert f'"{local}"' in command
+    window.hide()
+
+
+def test_open_data_dir_uses_uploads(tmp_path: Path, qtbot) -> None:
+    window = make_window(tmp_path, qtbot)
+    with patch("quicklanshare.ui.main_window.QDesktopServices.openUrl") as open_url:
+        window.open_data_dir()
+    assert (tmp_path / "uploads").is_dir()
+    opened = Path(open_url.call_args[0][0].toLocalFile())
+    assert opened.resolve() == (tmp_path / "uploads").resolve()
+    window.hide()
+
+
+def test_main_window_download_state_filter_and_qr(tmp_path: Path, qtbot) -> None:
+    window = make_window(tmp_path, qtbot)
+    window.show()
+    with qtbot.waitSignal(window.backend.started, timeout=20000):
+        window.start_server()
+    qtbot.waitUntil(lambda: window.backend.is_running, timeout=5000)
+    download_dir = tmp_path / "downloads"
+    download_dir.mkdir()
+    window.app_config.ui.download_dir = str(download_dir)
+    assert window._download_dir() == download_dir
+    source = tmp_path / "sample.txt"
+    source.write_text("download me", encoding="utf-8")
+    target = download_dir / "sample.txt"
+    window.backend.upload_paths([source])
+    qtbot.waitUntil(
+        lambda: any(item.get("name") == "sample.txt" for item in window._files),
+        timeout=8000,
+    )
+    window.save_download("sample.txt")
+    qtbot.waitUntil(
+        lambda: window._download_registry.get("sample.txt") == target,
+        timeout=10000,
+    )
+    assert target.exists()
+    assert "已下载 1" in window.download_summary.text()
+
+    local = tmp_path / "demo.txt"
+    local.write_text("demo", encoding="utf-8")
+    window._download_registry.record("demo.txt", local)
+    window._downloaded = window._download_registry.all()
+    window._apply_files([{"name": "demo.txt", "size": 4, "modified": 0, "download_count": 0}])
+    assert "已下载 1" in window.download_summary.text()
+    assert window.file_table.rowCount() == 1
+    window.select_all_checkbox.setChecked(True)
+    assert window.file_table.checked_count() == 1
+    assert window.zip_button.isEnabled()
+    assert window.delete_button.isEnabled()
+
+    window.qr_button.click()
+    qtbot.waitUntil(lambda: window.qr_overlay.isVisible(), timeout=3000)
+    QTest.mouseClick(window.qr_overlay, Qt.MouseButton.LeftButton, pos=QPoint(8, 8))
+    qtbot.waitUntil(lambda: not window.qr_overlay.isVisible(), timeout=2000)
+
+    window.qr_button.hoverChanged.emit(True)
+    qtbot.waitUntil(lambda: window.qr_peek.isVisible(), timeout=2000)
+    window.qr_button.hoverChanged.emit(False)
+    qtbot.waitUntil(lambda: not window.qr_peek.isVisible(), timeout=2000)
+
+    with qtbot.waitSignal(window.backend.stopped, timeout=15000):
+        window.backend.stop_server("test-stop")
+    qtbot.waitUntil(lambda: not window.backend.is_running, timeout=5000)
     window.hide()

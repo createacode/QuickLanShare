@@ -3,16 +3,20 @@
 from __future__ import annotations
 
 import copy
+from pathlib import Path
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QComboBox,
     QDialog,
     QDoubleSpinBox,
+    QFileDialog,
     QFrame,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QPushButton,
+    QScrollArea,
     QSpinBox,
     QVBoxLayout,
     QWidget,
@@ -24,6 +28,7 @@ from ..utils.app_config import (
     MIN_AUTO_SHUTDOWN_HOURS,
     AppConfig,
 )
+from ..utils.downloads import default_download_dir
 from . import theme
 from .widgets import ToggleSwitch
 
@@ -73,7 +78,9 @@ class SettingsDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("设置 - QuickLanShare")
         self.setModal(True)
-        self.setMinimumWidth(560)
+        self.setMinimumSize(560, 520)
+        self.resize(580, 720)
+        self._download_dir_custom = False
         self._original = config
         self.result_config: AppConfig = copy.deepcopy(config)
         self._build_ui()
@@ -81,9 +88,23 @@ class SettingsDialog(QDialog):
 
     # ------------------------------------------------------------------- UI
     def _build_ui(self) -> None:
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(24, 20, 24, 20)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setStyleSheet(
+            "QScrollArea { background: transparent; border: none; }"
+            "QScrollArea > QWidget > QWidget { background: transparent; }"
+        )
+        content = QWidget()
+        layout = QVBoxLayout(content)
+        layout.setContentsMargins(24, 20, 24, 16)
         layout.setSpacing(14)
+        scroll.setWidget(content)
+        outer.addWidget(scroll, 1)
 
         title = QLabel("设置")
         title.setObjectName("PageTitle")
@@ -109,6 +130,75 @@ class SettingsDialog(QDialog):
             )
         )
         layout.addWidget(server_group)
+
+        access_group, access_layout = _group(
+            "访问控制", "按 IPv4 前几段限制哪些设备可以打开共享页面。"
+        )
+        self.ip_scope_combo = QComboBox()
+        self.ip_scope_combo.addItem("仅放通最后一位（同一网段）", "last1")
+        self.ip_scope_combo.addItem("放通最后 2 位", "last2")
+        self.ip_scope_combo.addItem("放通最后 3 位", "last3")
+        self.ip_scope_combo.addItem("全部放通", "all")
+        self.ip_scope_combo.setFixedWidth(240)
+        self.ip_scope_combo.setCursor(Qt.CursorShape.PointingHandCursor)
+        access_layout.addWidget(
+            _row(
+                "IP 放通范围",
+                self.ip_scope_combo,
+                "例：本机 192.168.1.10，默认允许 192.168.1.x；本机 127.0.0.1 始终允许。"
+                "修改后需重启服务生效。",
+            )
+        )
+        layout.addWidget(access_group)
+
+        startup_group, startup_layout = _group(
+            "启动", "登录 Windows 后自动启动 QuickLanShare；双击 exe 仍会正常打开主界面。"
+        )
+        self.autostart_toggle = ToggleSwitch()
+        startup_layout.addWidget(
+            _row(
+                "开机自启",
+                self.autostart_toggle,
+                "默认关闭。开启后，登录 Windows 时自动启动本程序。",
+            )
+        )
+        self.silent_toggle = ToggleSwitch()
+        self.silent_row = _row(
+            "静默自启",
+            self.silent_toggle,
+            "开启后开机不显示主界面，只在系统托盘运行；点击托盘图标可显示。",
+        )
+        startup_layout.addWidget(self.silent_row)
+        layout.addWidget(startup_group)
+
+        download_group, download_layout = _group(
+            "下载", "默认保存到当前用户的下载目录；可改为其他磁盘位置。"
+        )
+        picker = QWidget()
+        picker_layout = QHBoxLayout(picker)
+        picker_layout.setContentsMargins(0, 0, 0, 0)
+        picker_layout.setSpacing(8)
+        self.download_dir_edit = QLineEdit()
+        self.download_dir_edit.setReadOnly(True)
+        self.download_dir_edit.setMinimumWidth(260)
+        self.download_dir_edit.setCursor(Qt.CursorShape.IBeamCursor)
+        picker_layout.addWidget(self.download_dir_edit, 1)
+        self.download_dir_button = QPushButton("更改…")
+        self.download_dir_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        picker_layout.addWidget(self.download_dir_button)
+        self.download_reset_button = QPushButton("恢复默认")
+        self.download_reset_button.setProperty("role", "link")
+        self.download_reset_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        picker_layout.addWidget(self.download_reset_button)
+        download_layout.addWidget(
+            _row(
+                "默认下载位置",
+                picker,
+                "自动识别 Windows 已知“下载”文件夹，包括已移动到 D 盘等位置；"
+                "“恢复默认”会重新跟随系统设置。",
+            )
+        )
+        layout.addWidget(download_group)
 
         shutdown_group, shutdown_layout = _group(
             "自动关闭", "默认在 24 小时后自动关闭程序；关闭开关后程序会一直运行。"
@@ -149,7 +239,9 @@ class SettingsDialog(QDialog):
         layout.addWidget(self.error_label)
 
         layout.addStretch(1)
+
         footer = QHBoxLayout()
+        footer.setContentsMargins(24, 10, 24, 18)
         footer.addStretch(1)
         cancel = QPushButton("取消")
         cancel.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -161,20 +253,52 @@ class SettingsDialog(QDialog):
         save.setDefault(True)
         save.clicked.connect(self._on_save)
         footer.addWidget(save)
-        layout.addLayout(footer)
+        outer.addLayout(footer)
 
         self.auto_toggle.toggled.connect(self.hours_spin.setEnabled)
+        self.autostart_toggle.toggled.connect(self._on_autostart_toggled)
+        self.download_dir_button.clicked.connect(self._choose_download_dir)
+        self.download_reset_button.clicked.connect(self._reset_download_dir)
+
+    def _on_autostart_toggled(self, checked: bool) -> None:
+        self.silent_row.setVisible(checked)
+        self.silent_toggle.setEnabled(checked)
+        if not checked:
+            self.silent_toggle.setChecked(False)
+
+    def _choose_download_dir(self) -> None:
+        start = self.download_dir_edit.text() or str(default_download_dir())
+        chosen = QFileDialog.getExistingDirectory(self, "选择默认下载目录", start)
+        if chosen:
+            self.download_dir_edit.setText(chosen)
+            self._download_dir_custom = True
+
+    def _reset_download_dir(self) -> None:
+        self._download_dir_custom = False
+        self.download_dir_edit.setText(str(default_download_dir()))
 
     def _load_values(self) -> None:
         server = self.result_config.server
         self.port_spin.setValue(server.port)
         self.browser_toggle.setChecked(server.open_browser)
+        scope_index = self.ip_scope_combo.findData(server.ip_scope)
+        self.ip_scope_combo.setCurrentIndex(max(0, scope_index))
         self.auto_toggle.setChecked(server.auto_shutdown_enabled)
         self.hours_spin.setValue(server.auto_shutdown_hours)
         self.hours_spin.setEnabled(server.auto_shutdown_enabled)
         self.tray_toggle.setChecked(self.result_config.ui.close_to_tray)
         level_index = self.level_combo.findText(self.result_config.ui.log_level)
         self.level_combo.setCurrentIndex(max(0, level_index))
+        self.autostart_toggle.setChecked(self.result_config.ui.autostart)
+        self.silent_toggle.setChecked(self.result_config.ui.autostart_silent)
+        if not self.result_config.ui.autostart:
+            self.silent_toggle.setChecked(False)
+        self.silent_row.setVisible(self.result_config.ui.autostart)
+        self.silent_toggle.setEnabled(self.result_config.ui.autostart)
+        self._download_dir_custom = bool(self.result_config.ui.download_dir)
+        self.download_dir_edit.setText(
+            self.result_config.ui.download_dir or str(default_download_dir())
+        )
 
     # ----------------------------------------------------------------- save
     def _on_save(self) -> None:
@@ -184,8 +308,21 @@ class SettingsDialog(QDialog):
         config.server.open_browser = self.browser_toggle.isChecked()
         config.server.auto_shutdown_enabled = self.auto_toggle.isChecked()
         config.server.auto_shutdown_hours = float(self.hours_spin.value())
+        config.server.ip_scope = str(self.ip_scope_combo.currentData() or "last1")
         config.ui.close_to_tray = self.tray_toggle.isChecked()
         config.ui.log_level = self.level_combo.currentText()
+        config.ui.autostart = self.autostart_toggle.isChecked()
+        config.ui.autostart_silent = (
+            self.autostart_toggle.isChecked() and self.silent_toggle.isChecked()
+        )
+        if self._download_dir_custom:
+            download_dir = Path(self.download_dir_edit.text()).expanduser()
+            if not download_dir.is_dir():
+                self._show_error("下载目录不存在，请重新选择")
+                return
+            config.ui.download_dir = str(download_dir)
+        else:
+            config.ui.download_dir = ""
         if not 1 <= config.server.port <= 65535:
             self._show_error("端口必须在 1 到 65535 之间")
             return

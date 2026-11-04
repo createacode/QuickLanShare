@@ -8,7 +8,7 @@
 from __future__ import annotations
 
 __software_name__ = "QuickLanShare"
-__version__ = "3.1.0"
+__version__ = "3.4.0"
 __author__ = "XAF"
 __copyright_ym__ = "2026.11"
 

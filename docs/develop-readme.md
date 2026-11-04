@@ -1,4 +1,4 @@
-# QuickLanShare v3.1.0 - Copyright © XAF 2026.11
+# QuickLanShare v3.4.0 - Copyright © XAF 2026.11
 
 > 面向开发者的完整开发手册：环境、构建、测试、架构、打包、踩坑与排错。
 > 项目定位与接口概览见 [readme.md](readme.md)。
@@ -204,6 +204,74 @@ MainWindow
   `configure_auto_shutdown`，返回新截止时间后刷新；
 - 自动关闭信息只出现在状态栏，顶部/文件区不再重复。
 
+### 3.8 文件勾选与下载状态
+
+- 表格列：复选框 / 文件名 / 大小 / 修改时间 / 下载次数 / 状态 / 操作；
+- 复选框使用真实 `QCheckBox` cell widget（不是 item check state），保证未选中时也有可见方框；
+- 工具栏「全选」使用 `QCheckBox` 三态：全选、部分、未选；只作用于当前列表；
+- 删除所选、打包下载都只读取 `FileTable.checked_names()`；未勾选时按钮禁用；
+- 状态由 `services/download_registry.py` 持久化到 `state/downloads.json`：
+  - 下载开始：状态「下载中」；
+  - 下载完成：记录文件名与本地路径，状态「已下载」；
+  - 其它：「未下载」；
+  - 已下载且文件仍存在时，「操作」列删除按钮右侧显示文件夹按钮，点击 `explorer /select,"<path>"` 定位文件（路径整体加引号，兼容空格）；
+- 统计显示「已下载 X · 下载中 Y · 未下载 Z」；不再提供筛选下拉框；
+- 下载记录损坏时改名 `.corrupt` 并忽略；文件被移动/删除后加载时自动丢弃记录。
+
+### 3.9 二维码交互
+
+- 地址胶囊后是 22px 小二维码（`QrButton`，固定 30×30，不增加顶栏高度）；
+- 悬停：`QrPeek` 浮层显示 180px 二维码，移出即收起；
+- 点击：`QrOverlay` 覆盖整个窗口，半透明深色遮罩（`rgba(15,23,42,115)`），
+  卡片居中显示 252px 二维码、地址与提示；点击卡片外任意区域或 Esc 恢复；
+- 地址胶囊仍可打开完整的「连接信息」弹层；弹层设置 `WA_TranslucentBackground`，
+  并在 `paintEvent` 中自绘圆角白底/描边，避免 Windows 上透明顶层出现整块黑底；
+  顶层不再使用 `QGraphicsDropShadowEffect`。
+
+### 3.10 开机自启与静默启动
+
+- 默认关闭；配置 `ui.autostart` 与 `ui.autostart_silent` 初始均为 `false`；
+- 设置 →「启动」：打开「开机自启」后才显示「静默自启」；
+- 实现：`services/autostart.py` 写
+  `HKCU\Software\Microsoft\Windows\CurrentVersion\Run\QuickLanShare`：
+  - 冻结态：`"<exe>" "--autostart" ["--silent"]`；
+  - 开发态：`"<pythonw.exe>" "<main.py>" "--autostart" ["--silent"]`；
+- 启动参数：
+  - `--autostart`：由注册表启动；
+  - `--silent`：不显示主界面，只保留托盘；
+- 判定：`start_hidden = args.silent or (args.autostart and config.ui.autostart_silent)`；
+  - 托盘可用：不调用 `window.show()`，服务照常启动，托盘气泡提示后台运行；
+  - 托盘不可用：降级为显示主界面并记录警告；
+- **双击 exe 不带参数，始终显示主界面**，不受静默设置影响；已有实例时第二次启动
+  通过单实例激活显示窗口；
+- 关闭「开机自启」会删除注册表值；注册表写入失败时设置回退为关闭并提示。
+
+### 3.11 默认下载目录
+
+- `utils/downloads.py`：
+  - 首选 `QStandardPaths.DownloadLocation`（Windows `SHGetKnownFolderPath(FOLDERID_Downloads)`），
+    能识别被重定向到 D 盘或其他位置的“下载”；
+  - Qt 为空时读注册表 `User Shell Folders` / `Shell Folders` 的 Downloads GUID；
+  - 最后回退 `~/Downloads`，再回退用户主目录；
+- `ui.download_dir` 默认空：每次下载时动态跟随系统“下载”；
+- 设置 →「下载」：显示当前实际路径，可「更改…」到其他目录，「恢复默认」清空自定义值；
+- 自定义目录无效（不存在/被删除）时 `resolve_download_dir` 回退系统“下载”；
+- 本机实测“下载”位于 `D:\Desktop\Downloads`，程序能正确识别；
+- 下载/打包不再弹保存框：`unique_download_path` 直接生成不重复路径（`文件 (1).ext`）；
+- 「选择文件」默认目录用 `QStandardPaths.DesktopLocation`，同样支持桌面重定向；
+- 「数据目录」按钮打开 `data_dir/uploads`，而不是数据根目录。
+
+### 3.12 IPv4 放通范围与本机网页控制
+
+- `services/access.py` 按 IPv4 段匹配：`last1`（默认，同前三段）、`last2`、`last3`、`all`；
+- 服务端中间件先查 Host，再查 IP 范围；以请求 Host 的 IPv4 为基准（多网卡更稳），
+  回环 `127.0.0.1` 始终放行；
+- 配置 `server.ip_scope` 默认 `last1`，设置 →「访问控制」可修改，重启服务生效；
+- 桌面端「打开网页」改为打开 `http://127.0.0.1:<port>`，因此本机网页保持自动关闭控制；
+- `/api/room-info` 返回 `local_client`，网页仅本机显示「自动关闭」开关；
+- `/api/shutdown` 与 `/api/auto-shutdown/extend` 服务端也仅允许本机调用，远端即使伪造请求也会 403。
+- 单文件上传上限提升到 25 GiB（`max_upload_size`）；ZIP 上限仍为 20 GiB。
+
 ---
 
 ## 4. 配置
@@ -357,7 +425,7 @@ Get-Content (Get-ChildItem logs\log_*.log | Sort-Object Name -Descending | Selec
 
 ### 8.3 上传限制
 
-- 单文件 20 GiB（`max_upload_size`）；
+- 单文件 25 GiB（`max_upload_size`）；
 - 单分片 32 MiB（`max_chunk_size`）；
 - JSON 请求 2 MiB；
 - 打包 20 GiB；
@@ -400,13 +468,17 @@ uv run pytest -q tests/test_ui.py
 | `test_logging_setup.py` | 命名、轮转、清理、非匹配文件 |
 | `test_local_client.py` | 上传/下载/ZIP/删除/取消/0 字节/文本收发 |
 | `test_chat_client.py` | WebSocket 历史、消息、删除、关闭、异常载荷、重连状态 |
+| `test_download_registry.py` | 下载记录持久化、缺失文件清理、损坏回退 |
+| `test_downloads.py` | 已知“下载”目录、D 盘自定义目录、目录缺失回退、重名编号 |
+| `test_access.py` | IPv4 四种放通范围、回环、IPv4-mapped、配置校验 |
+| `test_autostart.py` | 自启命令、注册表写入/删除/失败、静默参数 |
 | `test_runtime.py` | 后台启动停止、自动关闭开关、计时到期 |
-| `test_ui.py` | 主题、双栏初始状态、启停服务、文本发送、日志抽屉、连接弹层、设置 |
+| `test_ui.py` | 双栏状态、文本发送、文件勾选/状态、二维码、下载目录/直接下载、表格对齐、设置 |
 
 ### 9.3 当前结果
 
-- `pytest`：**95 passed**；
-- core + services 覆盖率：**80%**（`chat_client` 85%，其余模块均 ≥73%）；
+- `pytest`：**123 passed**；
+- core + services 覆盖率：**80%**（`autostart` 88%、`download_registry` 85%、`chat_client` 85%，其余模块均 ≥73%）；
 - GUI 测试使用 `QT_QPA_PLATFORM=offscreen`（`tests/conftest.py`），不弹真实窗口。
 
 > offscreen 平台在 Windows 上可能打印
@@ -434,7 +506,7 @@ uv run mypy
 
 - ruff：通过（`E/F/I/W/B/UP/SIM/RUF`，行宽 100）；
 - ruff format：通过；
-- mypy：`strict = true`，37 个源文件通过。
+- mypy：`strict = true`，42 个源文件通过。
 
 类型约定：
 
@@ -497,7 +569,7 @@ uv run pyinstaller --noconfirm --clean --windowed --onedir `
 ### 11.3 发布目录
 
 ```text
-release/QuickLanShare_v3.1.0_win-x64_YYYYMMDD/
+release/QuickLanShare_v3.4.0_win-x64_YYYYMMDD/
 ├─ QuickLanShare.exe
 ├─ _internal/                 # Python、Qt、依赖
 ├─ README.md
@@ -513,7 +585,7 @@ release/QuickLanShare_v3.1.0_win-x64_YYYYMMDD/
 ```
 
 - 包内不含源码、`.git`、构建中间产物与测试数据；
-- `QuickLanShare_v3.1.0_win-x64_YYYYMMDD.zip` 与目录同级。
+- `QuickLanShare_v3.4.0_win-x64_YYYYMMDD.zip` 与目录同级。
 
 ### 11.4 校验
 
@@ -549,7 +621,7 @@ Get-Content SHA256SUMS.txt | ForEach-Object {
 
 ```python
 __software_name__ = "QuickLanShare"
-__version__ = "3.1.0"
+__version__ = "3.4.0"
 __author__ = "XAF"
 __copyright_ym__ = "2026.11"
 ```
@@ -582,6 +654,19 @@ v3.0.0 属于不兼容变更（CLI → GUI、目录与配置布局变化）。
 
 v3.1.0 属于新增功能 + 界面重构（MINOR）：新增文本共享、双栏布局、日志抽屉；
 配置字段未变，v3.0 的 `config.json` 可直接沿用。
+
+v3.2.0 属于新增功能（MINOR）：文件勾选/下载状态、二维码交互、开机自启；
+新增 `ui.autostart` / `ui.autostart_silent`，默认关闭。
+
+v3.2.1 属于修复（PATCH）：二维码按钮 tooltip 遮挡、连接弹层黑底、文件夹图标位置。
+
+v3.2.2 属于修复（PATCH）：状态列文字改为居中，与表头对齐。
+
+v3.3.0 属于新增功能（MINOR）：默认下载目录跟随 Windows 已知“下载”，
+支持 D 盘重定向，设置中可修改/恢复默认；新增 `ui.download_dir`（默认空）。
+
+v3.4.0 属于新增功能（MINOR）：直接下载、25 GiB 单文件、IPv4 放通范围、
+本机网页保留关闭控制、数据目录/桌面默认路径与表格对齐。
 
 ---
 
@@ -633,7 +718,7 @@ v3.1.0 属于新增功能 + 界面重构（MINOR）：新增文本共享、双�
 - **现象**：`pytest` 收集失败 `ModuleNotFoundError: qls`。
 - **原因**：包从 `qls/` 迁移到 `src/quicklanshare/services/`，测试未同步。
 - **解决**：统一改为 `quicklanshare.services.*`；`filenames.py` 替代旧 `paths.py`。
-- **验证**：95 个测试全部通过。
+- **验证**：123 个测试全部通过。
 - **避免**：重构时用全仓搜索旧包名，并先跑一次测试。
 
 ### 14.2 界面日志被 HTTP 访问日志刷屏
@@ -778,7 +863,8 @@ v3.1.0 属于新增功能 + 界面重构（MINOR）：新增文本共享、双�
 
 ## 17. 安全注意事项
 
-1. 默认监听 `0.0.0.0`，同一局域网可访问；公共 Wi-Fi 下请关闭服务。
+1. 默认监听 `0.0.0.0`，但只放通与本机同前三段的 IPv4；公共 Wi-Fi 下仍建议关闭服务。
+   若改为「全部放通」，请确认网络环境可信。
 2. 服务端已做 Host/Origin/Sec-Fetch-Site 校验，但仍不应暴露到公网。
 3. 上传文件保存在 `uploads/`，请定期清理敏感文件。
 4. 不要把含令牌/密码的文件拖入共享。
@@ -789,7 +875,7 @@ v3.1.0 属于新增功能 + 界面重构（MINOR）：新增文本共享、双�
 
 ## 18. 遗留项与后续计划
 
-- [ ] 开机自启（注册表 Run / 启动文件夹，需产品决策）；
+- [x] 开机自启（当前用户注册表 Run，支持静默）；
 - [ ] 深色主题与主题跟随系统；
 - [ ] 传输限速与并发上限设置；
 - [ ] 文本消息附件 / 富文本（需服务端协议扩展）；
@@ -808,28 +894,35 @@ v3.1.0 属于新增功能 + 界面重构（MINOR）：新增文本共享、双�
 | 依赖同步 | `uv sync --frozen` | 通过 |
 | 代码风格 | `uv run ruff check .` | 通过 |
 | 格式化 | `uv run ruff format --check .` | 通过 |
-| 类型检查 | `uv run mypy`（strict） | 通过，37 个源文件 |
-| 单元/集成/GUI 测试 | `uv run pytest -q` | 通过，95 passed |
+| 类型检查 | `uv run mypy`（strict） | 通过，42 个源文件 |
+| 单元/集成/GUI 测试 | `uv run pytest -q` | 通过，123 passed |
 | 覆盖率 | `--cov=quicklanshare.services --cov=quicklanshare.core` | 80%（各模块 ≥73%） |
 | 版本一致性 | `uv run python scripts/verify_version.py` | 通过（退出码 0） |
 | PyInstaller 构建 | `pwsh -File scripts/build.ps1` | 通过 |
 | exe 启动验证 | 双击发布包 exe / 进程与日志检查 | 通过 |
 | 单实例 | 第二次启动 exe | 通过：第二进程退出，主窗口保持 |
 | 优雅退出 | 关闭主窗口（`close_to_tray=false`） | 通过：服务停止、进程退出码 0 |
-| HTTP 服务 | `GET /api/room-info` | 通过：返回 3.1.0 / 文件数 / 版权 |
+| HTTP 服务 | `GET /api/room-info` | 通过：返回 3.4.0 / 文件数 / 版权 |
 | 24 小时自动关闭 | 单元测试压缩时长为毫秒级 | 通过：到期停止服务并以 `auto-shutdown` 退出 |
 | 文本共享 | 桌面端发送 / 网页端消息 / 删除 / 重连状态 | 通过：`test_ui` 与 `test_chat_client` |
+| 文件勾选/下载状态 | 全选、已下载状态、打开文件夹 | 通过：`test_ui` 与 `test_download_registry` |
+| 默认下载/直接保存 | 自定义下载目录、重名编号、无保存对话框 | 通过：`test_ui` 与 `test_downloads` |
+| IP 放通范围 | 四种范围、回环、配置校验 | 通过：`test_access` |
+| 本机网页控制 | `/api/room-info` 返回 `local_client` | 通过：`test_api`；远端关闭接口由服务端限制 |
+| 数据目录/桌面路径 | 打开 uploads、选择文件默认桌面 | 通过：`test_ui` 与 `test_downloads` |
+| 静默自启 | `QuickLanShare.exe --silent`，再次普通启动 | 通过：首个进程无主窗口，第二次启动激活窗口 |
+| 开机自启注册表 | `apply_autostart(True/False)` | 通过：写入/删除 HKCU Run 值 |
 
 构建产物（2026-11-04）：
 
 | 项 | 值 |
 | --- | --- |
-| 发布目录 | `release/QuickLanShare_v3.1.0_win-x64_20261104/` |
-| 发布目录大小 | 130.8 MB |
-| exe | `QuickLanShare.exe`（4,644,393 字节） |
-| exe 属性 | ProductName/FileVersion/ProductVersion/LegalCopyright 均正确（3.1.0 / XAF 2026.11） |
+| 发布目录 | `release/QuickLanShare_v3.4.0_win-x64_20261104/` |
+| 发布目录大小 | 131.0 MB |
+| exe | `QuickLanShare.exe`（4,673,995 字节） |
+| exe 属性 | ProductName/FileVersion/ProductVersion/LegalCopyright 均正确（3.4.0 / XAF 2026.11） |
 | 打包资源 | `_internal/client/index.html`、`_internal/app.ico`、`qwindows.dll`、`docs/images/` 均存在 |
-| ZIP | `QuickLanShare_v3.1.0_win-x64_20261104.zip`（包含完整发布目录） |
+| ZIP | `QuickLanShare_v3.4.0_win-x64_20261104.zip`（包含完整发布目录） |
 | 校验 | `SHA256SUMS.txt` 已生成，全量校验通过 |
 | exe 文本接口 | 启动 exe 后 `POST /api/chat/send` 成功，桌面端 WebSocket 已连接 |
 
@@ -838,6 +931,7 @@ v3.1.0 属于新增功能 + 界面重构（MINOR）：新增文本共享、双�
 - 未在“全新安装的 Windows 10 / Windows 11 实机”上做最终验收（当前为开发机运行验证）；
 - 未做代码签名，未测试 SmartScreen 正式分发流程；
 - 未生成 Inno Setup 安装包（本次交付为便携目录 + ZIP）；
+- 未重启系统验证“登录 Windows 自动启动”真实流程（已用 `--silent` 启动、注册表读写与二次启动激活分别验证）；
 - 未在 125% / 150% 缩放的实机屏幕上逐项截图回归（窗口已做可用区域夹紧与滚动兜底）。
 
 ---
@@ -846,5 +940,10 @@ v3.1.0 属于新增功能 + 界面重构（MINOR）：新增文本共享、双�
 
 | 日期 | 版本号 | 说明 |
 | --- | --- | --- |
+| 2026-11-04 | 3.4.0 | 直接下载、25 GiB、IPv4 放通范围、本机网页关闭控制、数据目录与桌面默认路径 |
+| 2026-11-04 | 3.3.0 | 默认下载目录跟随系统“下载”（支持 D 盘重定向），设置可修改/恢复 |
+| 2026-11-04 | 3.2.2 | 状态列文字居中，与表头对齐 |
+| 2026-11-04 | 3.2.1 | 二维码 tooltip 遮挡、连接弹层黑底、文件夹图标位置调整 |
+| 2026-11-04 | 3.2.0 | 文件勾选/下载状态/筛选、二维码小图与居中遮罩、开机自启/静默自启与相关测试/踩坑 |
 | 2026-11-04 | 3.1.0 | 双栏工作台、桌面文本共享（WebSocket 订阅 + HTTP 发送）、日志抽屉、连接弹层与相关测试/踩坑 |
 | 2026-11-04 | 3.0.0 | 新建开发手册：环境、架构、线程模型、配置、日志、自动关闭、测试、打包与踩坑 |

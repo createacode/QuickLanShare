@@ -31,6 +31,7 @@ from PySide6.QtGui import (
 from PySide6.QtWidgets import (
     QAbstractButton,
     QAbstractItemView,
+    QCheckBox,
     QFrame,
     QHBoxLayout,
     QHeaderView,
@@ -185,7 +186,7 @@ class DropZone(QFrame):
             title = QLabel("拖拽文件到这里")
             title.setStyleSheet(f"font-size: 14px; font-weight: 600; color: {theme.TEXT};")
             text_box.addWidget(title)
-            self._hint = QLabel("或点击选择文件 · 支持多文件 · 分块续传 · 单文件最大 20 GB")
+            self._hint = QLabel("或点击选择文件 · 支持多文件 · 分块续传 · 单文件最大 25 GB")
             self._hint.setObjectName("Muted")
             text_box.addWidget(self._hint)
             layout.addLayout(text_box, 1)
@@ -213,7 +214,7 @@ class DropZone(QFrame):
             title.setAlignment(Qt.AlignmentFlag.AlignCenter)
             layout.addWidget(title)
 
-            self._hint = QLabel("支持多文件 · 分块续传 · 单文件最大 20 GB")
+            self._hint = QLabel("支持多文件 · 分块续传 · 单文件最大 25 GB")
             self._hint.setObjectName("Muted")
             self._hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
             layout.addWidget(self._hint)
@@ -224,10 +225,10 @@ class DropZone(QFrame):
         super().setEnabled(enabled)
         self._enabled = enabled
         self._hint.setText(
-            "或点击选择文件 · 支持多文件 · 分块续传 · 单文件最大 20 GB"
+            "或点击选择文件 · 支持多文件 · 分块续传 · 单文件最大 25 GB"
             if enabled and self._compact
             else (
-                "支持多文件 · 分块续传 · 单文件最大 20 GB"
+                "支持多文件 · 分块续传 · 单文件最大 25 GB"
                 if enabled
                 else "服务未运行，启动后可上传文件"
             )
@@ -401,20 +402,39 @@ class EmptyState(QWidget):
 
 
 class FileTable(QTableWidget):
-    """共享文件列表：多选、下载、删除、右键菜单。"""
+    """共享文件列表：复选框、下载状态、下载/删除/打开文件夹。"""
 
     downloadRequested = Signal(str)
     deleteRequested = Signal(list)
     copyLinkRequested = Signal(str)
+    openFolderRequested = Signal(str)
     selectionCountChanged = Signal(int)
 
-    HEADERS = ("文件名", "大小", "修改时间", "下载", "操作")
+    HEADERS = ("", "文件名", "大小", "修改时间", "下载", "状态", "操作")
+    COL_CHECK = 0
+    COL_NAME = 1
+    COL_SIZE = 2
+    COL_TIME = 3
+    COL_COUNT = 4
+    COL_STATUS = 5
+    COL_ACTIONS = 6
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._files: list[dict[str, Any]] = []
+        self._checked: set[str] = set()
+        self._downloaded: dict[str, Path] = {}
+        self._downloading: set[str] = set()
         self.setColumnCount(len(self.HEADERS))
         self.setHorizontalHeaderLabels(list(self.HEADERS))
+        for column in range(len(self.HEADERS)):
+            header_item = self.horizontalHeaderItem(column)
+            if header_item is not None:
+                header_item.setTextAlignment(
+                    Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
+                    if column == self.COL_NAME
+                    else Qt.AlignmentFlag.AlignCenter
+                )
         self.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
@@ -426,8 +446,16 @@ class FileTable(QTableWidget):
         self.verticalHeader().setDefaultSectionSize(46)
         self.horizontalHeader().setFixedHeight(36)
         self.horizontalHeader().setHighlightSections(False)
-        self.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
-        for index, width in enumerate((88, 148, 64, 80), start=1):
+        self.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)
+        self.setColumnWidth(0, 34)
+        self.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        for index, width in (
+            (self.COL_SIZE, 76),
+            (self.COL_TIME, 108),
+            (self.COL_COUNT, 48),
+            (self.COL_STATUS, 72),
+            (self.COL_ACTIONS, 104),
+        ):
             self.horizontalHeader().setSectionResizeMode(index, QHeaderView.ResizeMode.Fixed)
             self.setColumnWidth(index, width)
         self.setIconSize(QSize(16, 16))
@@ -435,61 +463,122 @@ class FileTable(QTableWidget):
         self.customContextMenuRequested.connect(self._show_menu)
         self.doubleClicked.connect(self._on_double_click)
         self.itemSelectionChanged.connect(self._emit_selection)
+        self._updating_checks = False
 
     # ------------------------------------------------------------ column state
     def column_widths(self) -> list[int]:
-        """当前列宽，用于写入配置。"""
-        return [self.columnWidth(index) for index in range(self.columnCount())]
+        """固定列宽，用于写入配置（不含复选框与文件名列）。"""
+        return [
+            self.columnWidth(self.COL_SIZE),
+            self.columnWidth(self.COL_TIME),
+            self.columnWidth(self.COL_COUNT),
+            self.columnWidth(self.COL_STATUS),
+            self.columnWidth(self.COL_ACTIONS),
+        ]
 
     def apply_column_widths(self, widths: list[int]) -> None:
-        """恢复用户上次的列宽（列 0 保持自动拉伸）。"""
-        for index in range(1, min(self.columnCount(), len(widths))):
+        if not isinstance(widths, list):
+            return
+        for offset, width in enumerate(widths[:5]):
             try:
-                width = int(widths[index])
+                value = int(width)
             except (TypeError, ValueError):
                 continue
-            if width >= 40:
-                self.setColumnWidth(index, width)
+            if value >= 40:
+                self.setColumnWidth(self.COL_SIZE + offset, min(320, value))
 
     # ------------------------------------------------------------------ data
-    def set_files(self, files: list[dict[str, Any]]) -> None:
-        selected = set(self.selected_names())
+    def set_files(
+        self,
+        files: list[dict[str, Any]],
+        downloaded: dict[str, Path] | None = None,
+        downloading: set[str] | None = None,
+    ) -> None:
         self._files = files
+        self._downloaded = dict(downloaded or {})
+        self._downloading = set(downloading or {})
         self.blockSignals(True)
         self.setRowCount(0)
         self.setRowCount(len(files))
         for row, entry in enumerate(files):
             name = str(entry.get("name") or "")
+            self.setCellWidget(row, self.COL_CHECK, self._check_cell(name))
+
             name_item = QTableWidgetItem(name)
             name_item.setData(Qt.ItemDataRole.UserRole, name)
             name_item.setToolTip(name)
             name_item.setIcon(icons.glyph_icon("file", size=15, color=theme.TEXT_MUTED))
-            self.setItem(row, 0, name_item)
+            self.setItem(row, self.COL_NAME, name_item)
 
             size_item = QTableWidgetItem(human_size(entry.get("size", 0)))
-            size_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-            self.setItem(row, 1, size_item)
+            size_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            self.setItem(row, self.COL_SIZE, size_item)
 
-            time_item = QTableWidgetItem(format_mtime(float(entry.get("modified") or 0)))
+            full_time = format_mtime(float(entry.get("modified") or 0))
+            time_item = QTableWidgetItem(full_time[5:] if full_time != "-" else "-")
+            time_item.setToolTip(full_time)
+            time_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
             time_item.setForeground(QBrush(QColor(theme.TEXT_SECONDARY)))
-            self.setItem(row, 2, time_item)
+            self.setItem(row, self.COL_TIME, time_item)
 
             count_item = QTableWidgetItem(str(int(entry.get("download_count") or 0)))
             count_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
             count_item.setForeground(QBrush(QColor(theme.TEXT_MUTED)))
-            self.setItem(row, 3, count_item)
+            self.setItem(row, self.COL_COUNT, count_item)
 
-            self.setCellWidget(row, 4, self._actions(name))
-            if name in selected:
-                self.selectRow(row)
+            self.setCellWidget(row, self.COL_STATUS, self._status_cell(name))
+            self.setCellWidget(row, self.COL_ACTIONS, self._actions(name))
         self.blockSignals(False)
         self._emit_selection()
+
+    def _check_cell(self, name: str) -> QWidget:
+        container = QWidget()
+        layout = QHBoxLayout(container)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        check = QCheckBox()
+        check.setChecked(name in self._checked)
+        check.setCursor(Qt.CursorShape.PointingHandCursor)
+        check.setToolTip(f"选择 {name}")
+        check.stateChanged.connect(lambda state, value=name: self._on_check_widget(value, state))
+        layout.addWidget(check, 0, Qt.AlignmentFlag.AlignCenter)
+        return container
+
+    def _on_check_widget(self, name: str, state: int) -> None:
+        if self._updating_checks:
+            return
+        if state == int(Qt.CheckState.Checked.value):
+            self._checked.add(name)
+        else:
+            self._checked.discard(name)
+        self._emit_selection()
+
+    def _status_cell(self, name: str) -> QWidget:
+        container = QWidget()
+        layout = QHBoxLayout(container)
+        layout.setContentsMargins(2, 2, 2, 2)
+        layout.setSpacing(2)
+        label = QLabel()
+        if name in self._downloading:
+            label.setText("下载中")
+            label.setStyleSheet(f"color: {theme.ACCENT}; font-size: 11px;")
+        elif name in self._downloaded:
+            label.setText("已下载")
+            label.setStyleSheet(f"color: {theme.SUCCESS}; font-size: 11px;")
+        else:
+            label.setText("未下载")
+            label.setStyleSheet(f"color: {theme.TEXT_MUTED}; font-size: 11px;")
+        layout.addStretch(1)
+        layout.addWidget(label, 0, Qt.AlignmentFlag.AlignCenter)
+        layout.addStretch(1)
+        return container
 
     def _actions(self, name: str) -> QWidget:
         container = QWidget()
         layout = QHBoxLayout(container)
         layout.setContentsMargins(2, 2, 2, 2)
-        layout.setSpacing(4)
+        layout.setSpacing(2)
+        layout.addStretch(1)
 
         download = QPushButton()
         download.setProperty("role", "icon")
@@ -511,29 +600,75 @@ class FileTable(QTableWidget):
 
         layout.addWidget(download)
         layout.addWidget(delete)
+
+        folder = self._downloaded.get(name)
+        if folder is not None:
+            open_folder = QPushButton()
+            open_folder.setProperty("role", "icon")
+            open_folder.setIcon(icons.glyph_icon("folder", size=15, color=theme.TEXT_SECONDARY))
+            open_folder.setIconSize(QSize(15, 15))
+            open_folder.setFixedSize(30, 30)
+            open_folder.setCursor(Qt.CursorShape.PointingHandCursor)
+            open_folder.setToolTip(f"打开所在文件夹\n{folder}")
+            open_folder.clicked.connect(
+                lambda _=False, value=name: self.openFolderRequested.emit(value)
+            )
+            layout.addWidget(open_folder)
+
         layout.addStretch(1)
         return container
 
     # -------------------------------------------------------------- selection
+    def checked_names(self) -> list[str]:
+        return [name for name in self._checked if name in self.visible_names()]
+
     def selected_names(self) -> list[str]:
-        rows = sorted({index.row() for index in self.selectionModel().selectedRows()})
+        """兼容旧调用：批量操作使用复选框结果。"""
+        return self.checked_names()
+
+    def checked_count(self) -> int:
+        return len(self.checked_names())
+
+    def visible_names(self) -> list[str]:
         names: list[str] = []
-        for row in rows:
-            item = self.item(row, 0)
+        for row in range(self.rowCount()):
+            item = self.item(row, self.COL_NAME)
             if item is not None:
                 value = item.data(Qt.ItemDataRole.UserRole)
                 if isinstance(value, str) and value:
                     names.append(value)
         return names
 
-    def select_all_rows(self) -> None:
-        self.selectAll()
+    def set_all_checked(self, checked: bool) -> None:
+        names = self.visible_names()
+        self._updating_checks = True
+        self._checked = set(names) if checked else set()
+        for row in range(self.rowCount()):
+            container = self.cellWidget(row, self.COL_CHECK)
+            if container is not None:
+                box = container.findChild(QCheckBox)
+                if box is not None:
+                    box.setChecked(checked)
+        self._updating_checks = False
+        self._emit_selection()
+
+    def clear_checked(self) -> None:
+        self.set_all_checked(False)
+
+    def check_all_state(self) -> Qt.CheckState:
+        total = self.rowCount()
+        checked = self.checked_count()
+        if total == 0 or checked == 0:
+            return Qt.CheckState.Unchecked
+        if checked >= total:
+            return Qt.CheckState.Checked
+        return Qt.CheckState.PartiallyChecked
 
     def _emit_selection(self) -> None:
-        self.selectionCountChanged.emit(len(self.selected_names()))
+        self.selectionCountChanged.emit(self.checked_count())
 
     def _on_double_click(self, index: Any) -> None:
-        item = self.item(index.row(), 0)
+        item = self.item(index.row(), self.COL_NAME)
         if item is not None:
             value = item.data(Qt.ItemDataRole.UserRole)
             if isinstance(value, str):
@@ -543,14 +678,13 @@ class FileTable(QTableWidget):
         index = self.indexAt(position)
         if not index.isValid():
             return
-        item = self.item(index.row(), 0)
+        item = self.item(index.row(), self.COL_NAME)
         if item is None:
             return
         name = item.data(Qt.ItemDataRole.UserRole)
-        selected = self.selected_names()
-        if name not in selected:
-            self.selectRow(index.row())
-            selected = self.selected_names()
+        checked = self.checked_names()
+        if name not in checked:
+            checked = [str(name)]
         menu = QMenu(self)
         download_action = QAction("下载", menu)
         download_action.triggered.connect(lambda: self.downloadRequested.emit(str(name)))
@@ -560,7 +694,7 @@ class FileTable(QTableWidget):
         menu.addAction(copy_action)
         menu.addSeparator()
         delete_action = QAction("删除所选", menu)
-        delete_action.triggered.connect(lambda: self.deleteRequested.emit(selected))
+        delete_action.triggered.connect(lambda: self.deleteRequested.emit(checked))
         menu.addAction(delete_action)
         menu.exec(self.viewport().mapToGlobal(position))
 

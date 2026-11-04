@@ -139,9 +139,21 @@ QSplitter#MainSplitter::handle:hover {{
     border-radius: 2px;
 }}
 QFrame#Popup {{
+    background-color: transparent;
+    border: none;
+}}
+QFrame#QrPeek {{
     background-color: {SURFACE};
     border: 1px solid {BORDER};
     border-radius: 14px;
+}}
+QFrame#QrCard {{
+    background-color: {SURFACE};
+    border: 1px solid {BORDER};
+    border-radius: 16px;
+}}
+QWidget#QrOverlay {{
+    background-color: transparent;
 }}
 QFrame#Drawer {{
     background-color: {SURFACE};
@@ -460,6 +472,11 @@ QLineEdit, QSpinBox, QDoubleSpinBox, QComboBox {{
     min-height: 20px;
     selection-background-color: {ACCENT};
     selection-color: #FFFFFF;
+}}
+QCheckBox {{
+    color: {TEXT_SECONDARY};
+    font-size: 12px;
+    spacing: 6px;
 }}
 QLineEdit:hover, QSpinBox:hover, QDoubleSpinBox:hover, QComboBox:hover {{
     border-color: #A9BBD4;

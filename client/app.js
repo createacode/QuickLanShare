@@ -131,6 +131,10 @@ class FileTransferApp {
             if (version && data.version) version.textContent = `v${data.version}`;
             const copyright = document.getElementById('copyrightInfo');
             if (copyright && data.copyright) copyright.textContent = data.copyright;
+            const shutdownWrapper = document.querySelector('.auto-shutdown-wrapper');
+            if (shutdownWrapper) {
+                shutdownWrapper.style.display = data.local_client ? '' : 'none';
+            }
         } catch (e) {
             console.error('加载房间信息失败', e);
         }

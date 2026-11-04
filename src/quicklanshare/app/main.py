@@ -51,6 +51,16 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--version", action="version", version=f"{__software_name__} {__version__}")
     parser.add_argument("--debug", action="store_true", help="本次运行输出调试日志")
     parser.add_argument("--config", type=Path, default=None, help="指定配置文件的完整路径")
+    parser.add_argument(
+        "--autostart",
+        action="store_true",
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--silent",
+        action="store_true",
+        help=argparse.SUPPRESS,
+    )
     return parser
 
 
@@ -114,6 +124,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
 
     window: MainWindow | None = None
+    start_hidden = bool(args.silent or (args.autostart and config.ui.autostart_silent))
     try:
         window = MainWindow(
             config,
@@ -121,10 +132,16 @@ def main(argv: Sequence[str] | None = None) -> int:
             session,
             data_dir=data_seed.data_dir,
             autostart=True,
+            start_hidden=start_hidden,
         )
         guard.activated.connect(window.show_from_tray)
-        window.show()
-        session.logger.info("界面已显示，配置文件: %s", config_result.path)
+        if start_hidden and window.tray_available:
+            session.logger.info("静默自启：主界面不显示，仅托盘运行")
+        else:
+            if start_hidden:
+                session.logger.warning("系统托盘不可用，静默自启降级为显示主界面")
+            window.show()
+            session.logger.info("界面已显示，配置文件: %s", config_result.path)
         exit_code = app.exec()
     except Exception:
         details = traceback.format_exc()

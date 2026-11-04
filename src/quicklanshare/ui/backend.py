@@ -270,10 +270,10 @@ class Backend(QObject):
 
     # --------------------------------------------------------------- download
     def download_file(self, name: str, target: Path) -> None:
-        if not self._runtime.is_running or self._client is None:
-            self.operation_failed.emit("服务未运行，无法下载")
-            return
         task_id = uuid.uuid4().hex[:10]
+        if not self._runtime.is_running or self._client is None:
+            self.download_finished.emit(task_id, name, False, "服务未运行，无法下载")
+            return
         self._cancel_events[task_id] = threading.Event()
         self._transfers[task_id] = "download"
         self.download_started.emit(task_id, name, 0)
