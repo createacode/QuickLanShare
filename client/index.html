@@ -15,15 +15,16 @@
                 <i class="fas fa-bolt"></i>
                 <div class="title-section">
                     <h1>局域网文件快速传输工具</h1>
-                    <span class="subtitle">基于WebSocket+分片传输，速度可达300MB/s+，支持断点续传、多文件并发、断网恢复</span>
+                    <span class="subtitle">分块续传上传 · 流式打包下载 · 断点续传下载 · 多文件并发</span>
                     <div class="auto-shutdown-wrapper">
                         <div class="auto-shutdown">
-                            <span>自动关闭(24小时)</span>
-                            <label class="switch">
+                            <span>自动关闭</span>
+                            <label class="switch" title="关闭将停止服务器，所有用户断开">
                                 <input type="checkbox" id="autoShutdownToggle" checked>
                                 <span class="slider round"></span>
                             </label>
-                            <span id="countdownDisplay" class="countdown">23:59:59</span>
+                            <span id="countdownDisplay" class="countdown">--:--:--</span>
+                            <button id="extendShutdownBtn" class="btn-extend" title="延长 3 小时（上限见服务器设置）">+</button>
                         </div>
                     </div>
                 </div>
@@ -68,7 +69,7 @@
                     <i class="fas fa-cloud-upload-alt"></i>
                     <h3>拖放文件到此处</h3>
                     <p>或点击选择文件（支持多文件）</p>
-                    <p class="hint">本机上传自动快速复制，远程上传极速分片</p>
+                    <p class="hint">分块续传上传，中断后可继续；下载交给浏览器，进度见下载栏</p>
                     <input type="file" id="fileInput" multiple style="display: none;">
                     <div class="transfer-stats">
                         <div class="stat"><i class="fas fa-upload"></i><span id="uploadSpeed">0 KB/s</span></div>
@@ -88,7 +89,7 @@
                         <button id="toggleSelectBtn" class="btn-secondary"><i class="fas fa-check-double"></i> 全选/取消</button>
                     </div>
                     <div class="toolbar-right">
-                        <span class="zip-limit" id="zipLimitHint">限500MB以内</span>
+                        <span class="zip-limit" id="zipLimitHint">限20GB以内</span>
                         <button id="downloadZipBtn" class="btn-primary"><i class="fas fa-file-archive"></i> 打包下载</button>
                         <button id="batchDeleteBtn" class="btn-danger"><i class="fas fa-trash-alt"></i> 删除选中</button>
                     </div>
@@ -113,10 +114,11 @@
         <!-- 底部 footer 部分 -->
         <footer>
             <div class="footer-left">连接状态: <span id="status">正在连接...</span></div>
-            <div class="footer-center"><span>Copyright © 2026.4 XAF</span></div>
+            <div class="footer-center"><span id="copyrightInfo">Copyright © XAF</span></div>
             <div class="footer-right">
                 <span>存储目录: ./uploads/</span>
-                <span class="feature-tag">⚡ 极速传输 | 断点续传 | 多文件并发</span>
+                <span class="feature-tag">⚡ 分块续传 | 流式打包 | 断点续传</span>
+                <span id="appVersion"></span>
             </div>
         </footer>
     </div>
@@ -133,6 +135,48 @@
         </div>
     </div>
 
+    <!-- 大文件下载提示 -->
+    <div id="largeDownloadModal" class="custom-modal large-download-modal" style="display: none;">
+        <div class="custom-modal-content large-download-content" role="dialog" aria-modal="true" aria-labelledby="largeDownloadTitle">
+            <div class="custom-modal-header large-download-header">
+                <i class="fas fa-exclamation-triangle"></i><span id="largeDownloadTitle">大文件下载提示</span>
+            </div>
+            <div class="custom-modal-body">
+                <p class="large-download-name" id="largeDownloadName"></p>
+                <p class="large-download-size">文件大小：<strong id="largeDownloadSize"></strong></p>
+                <p class="large-download-reason">检测到文件超过 1 GiB，为保证传输稳定性，已交给浏览器/系统下载。</p>
+                <p class="large-download-hint">本页面不显示下载进度，请在浏览器下载列表查看进度和速度。</p>
+                <p class="large-download-shortcut">
+                    快捷键：<kbd>Ctrl</kbd>+<kbd>J</kbd>（Chrome / Edge / Firefox）<br>
+                    下载地址：<code id="downloadsUrlLabel">chrome://downloads/</code>
+                </p>
+                <div class="large-download-actions">
+                    <button id="openDownloadsBtn" class="btn-confirm-yes">
+                        <i class="fas fa-external-link-alt"></i> 打开下载列表
+                    </button>
+                    <button id="copyDownloadsUrlBtn" class="btn-secondary" style="background:#6c757d;color:#fff;border:none;padding:8px 16px;border-radius:6px;font-size:14px;cursor:pointer;">复制下载地址</button>
+                </div>
+                <p class="large-download-countdown">
+                    窗口将在 <span id="largeDownloadCountdown">40</span> 秒后自动关闭
+                </p>
+            </div>
+            <div class="custom-modal-footer">
+                <button id="closeLargeDownloadBtn" class="btn-confirm-close" style="background:#607d8b;color:#fff;border:none;padding:8px 24px;border-radius:6px;font-size:14px;cursor:pointer;">知道了</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 服务器关闭后的兜底页面 -->
+    <div id="serverClosedOverlay" class="server-closed-overlay" style="display: none;">
+        <div class="server-closed-card">
+            <i class="fas fa-power-off"></i>
+            <h2>服务器已关闭</h2>
+            <p id="serverClosedReason">服务器已被关闭。</p>
+            <p>后端服务已停止，所有连接已断开。</p>
+            <p class="server-closed-hint">页面将自动关闭；若浏览器阻止关闭，将跳转新标签页或空白页。</p>
+        </div>
+    </div>
+
     <!-- 模板 -->
     <template id="fileItemTemplate">
         <div class="file-item" data-file-id="">
@@ -143,7 +187,7 @@
                 <div class="file-meta"><span class="file-size"></span><span class="file-date"></span><span class="download-count">⬇️ 0</span></div>
                 <div class="file-progress download-progress" style="display: none;">
                     <div class="progress-bar"><div class="progress-fill"></div></div>
-                    <span class="progress-text">0%</span>
+                    <span class="progress-text">0%</span><span class="progress-size"></span>
                 </div>
                 <div class="transfer-info"><span class="transfer-speed"></span><span class="transfer-time"></span></div>
             </div>
@@ -163,7 +207,7 @@
                 <div class="file-meta"><span class="file-size"></span><span class="file-date"></span><span class="download-count">⬇️ 0</span></div>
                 <div class="file-progress download-progress" style="display: none;">
                     <div class="progress-bar"><div class="progress-fill"></div></div>
-                    <span class="progress-text">0%</span>
+                    <span class="progress-text">0%</span><span class="progress-size"></span>
                 </div>
                 <div class="transfer-info"><span class="transfer-speed"></span><span class="transfer-time"></span></div>
             </div>

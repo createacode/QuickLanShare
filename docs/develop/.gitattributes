@@ -1,0 +1,18 @@
+# 统一换行符，避免 Windows / Linux 协作时整文件 diff
+* text=auto eol=lf
+
+# 文档与生成物使用 LF
+*.md text eol=lf
+
+# Windows 批处理使用 CRLF
+*.cmd text eol=crlf
+*.bat text eol=crlf
+
+# 二进制资源
+*.ico binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.mp4 binary
+*.webm binary

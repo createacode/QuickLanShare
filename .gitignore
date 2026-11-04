@@ -1,0 +1,53 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+dist/
+build/
+*.egg
+.env
+.venv/
+venv/
+env/
+
+# 打包 / 发布
+*.spec
+release/
+SHA256SUMS.txt
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# 运行时数据
+logs/*
+!logs/.gitkeep
+uploads/
+chat/
+state/
+config/*.json
+config/*.bak
+config/*.corrupt
+config/*.tmp
+*.log
+*.part
+.pytest_cache/
+.coverage
+coverage.xml
+htmlcov/
+tests/_tmp_uploads/
+.ruff_cache/
+.mypy_cache/
+build-log.txt
+
+tests/_smoke/
+tests/_tmp_*/

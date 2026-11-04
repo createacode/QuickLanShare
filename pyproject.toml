@@ -1,0 +1,113 @@
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[project]
+name = "quicklanshare"
+dynamic = ["version"]
+description = "QuickLanShare —— 局域网文件快速传输桌面工具（PySide6）"
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [{ name = "XAF" }]
+keywords = ["lan", "file-sharing", "pyside6", "windows", "desktop"]
+classifiers = [
+  "Development Status :: 5 - Production/Stable",
+  "Environment :: Win32 (MS Windows)",
+  "Intended Audience :: End Users/Desktop",
+  "License :: OSI Approved :: GNU Affero General Public License v3",
+  "Operating System :: Microsoft :: Windows :: Windows 10",
+  "Operating System :: Microsoft :: Windows :: Windows 11",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Desktop Environment",
+  "Topic :: Internet :: File Transfer Protocol (FTP)",
+]
+dependencies = [
+  "aiohttp>=3.10,<4",
+  "aiofiles>=24.1,<25",
+  "PySide6>=6.8,<7",
+  "qrcode[pil]>=8,<9",
+  "Pillow>=10,<12",
+]
+
+[project.gui-scripts]
+QuickLanShare = "quicklanshare.app.main:main"
+
+[project.urls]
+Homepage = "https://gitee.com/user_gitee/develop"
+
+[dependency-groups]
+dev = [
+  "pyinstaller>=6.11,<7",
+  "pytest>=8.3,<9",
+  "pytest-asyncio>=0.24,<1",
+  "pytest-cov>=6,<7",
+  "pytest-qt>=4.4,<5",
+  "ruff>=0.8,<1",
+  "mypy>=1.13,<2",
+]
+
+[tool.hatch.version]
+path = "src/quicklanshare/core/version.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/quicklanshare"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+extend-exclude = ["build", "dist", "release", "client", "docs/develop", "third_party"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W", "B", "UP", "SIM", "RUF"]
+ignore = ["E501", "RUF001", "RUF002", "RUF003"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["S101", "SIM117"]
+"src/quicklanshare/ui/*" = ["B008"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+line-ending = "lf"
+
+[tool.mypy]
+python_version = "3.13"
+mypy_path = "src"
+packages = ["quicklanshare"]
+strict = true
+warn_unused_ignores = true
+warn_redundant_casts = true
+show_error_codes = true
+exclude = ["tests/", "build/", "dist/", "release/"]
+
+[[tool.mypy.overrides]]
+module = ["qrcode.*", "aiofiles.*"]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+addopts = "-ra --strict-markers"
+qt_api = "pyside6"
+asyncio_default_fixture_loop_scope = "function"
+filterwarnings = [
+  "ignore::DeprecationWarning:aiohttp.*",
+  "ignore::ResourceWarning",
+]
+
+[tool.coverage.run]
+source = ["quicklanshare"]
+branch = true
+omit = ["*/tests/*"]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = false
+exclude_lines = [
+  "pragma: no cover",
+  "if TYPE_CHECKING:",
+  "raise NotImplementedError",
+  "if __name__ == .__main__.:",
+]

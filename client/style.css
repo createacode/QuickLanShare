@@ -634,12 +634,10 @@ main {
     min-width: 50px;
     text-align: center;
     margin-right: 15px;
-    color: #667eea;
     background: linear-gradient(135deg, #667eea, #764ba2);
     -webkit-background-clip: text;
     background-clip: text;
     color: transparent;
-    text-shadow: 0 2px 4px rgba(0,0,0,0.1);
 }
 
 /* 文件信息区域允许换行 */
@@ -676,9 +674,9 @@ main {
 
 .progress-bar {
     flex: 1;
-    height: 6px;
+    height: 12px;
     background: #e0e0e0;
-    border-radius: 3px;
+    border-radius: 6px;
     overflow: hidden;
 }
 
@@ -686,7 +684,28 @@ main {
     height: 100%;
     background: linear-gradient(90deg, #4CAF50, #8BC34A);
     width: 0%;
+    border-radius: 6px;
     transition: width 0.3s;
+}
+
+.progress-text {
+    display: inline-block;
+    width: 55px;
+    font-family: 'Consolas', 'Courier New', monospace;
+    font-size: 12px;
+    color: #666;
+    text-align: right;
+    white-space: nowrap;
+}
+
+.progress-size {
+    display: inline-block;
+    width: 150px;
+    font-family: 'Consolas', 'Courier New', monospace;
+    font-size: 12px;
+    color: #666;
+    white-space: nowrap;
+    margin-left: 6px;
 }
 
 .transfer-info {
@@ -939,16 +958,23 @@ footer {
         flex-direction: column;
     }
 
-    /* 窄屏下隐藏工具栏按钮（全选、打包下载、删除选中） */
+    /* 窄屏下工具栏换行显示，保留全部批量操作 */
+    .file-toolbar {
+        justify-content: center;
+    }
+
+    .toolbar-left,
+    .toolbar-right {
+        width: 100%;
+        justify-content: center;
+        flex-wrap: wrap;
+    }
+
     .file-toolbar .btn-secondary,
     .file-toolbar .btn-primary,
     .file-toolbar .btn-danger {
-        display: none;
-    }
-
-    /* 但保留限大小提示 */
-    .zip-limit {
-        display: inline-block;
+        font-size: 12px;
+        padding: 6px 10px;
     }
 
     /* 文件项调整：复选框始终左对齐，文件信息自适应 */
@@ -994,9 +1020,193 @@ footer {
         gap: 4px;
     }
 
+    .progress-size {
+        width: auto;
+        min-width: 0;
+        margin-left: 0;
+    }
+
+    .progress-bar {
+        min-width: 80px;
+    }
+
     .btn-action {
         width: 28px;
         height: 28px;
         font-size: 12px;
     }
+}
+/* ========== 自动关闭：延长按钮 ========== */
+.btn-extend {
+    width: 20px;
+    height: 20px;
+    margin-left: 2px;
+    border: none;
+    border-radius: 50%;
+    background: rgba(255, 255, 255, 0.25);
+    color: #fff;
+    font-size: 16px;
+    line-height: 18px;
+    font-weight: bold;
+    cursor: pointer;
+    padding: 0;
+    transition: background 0.2s, transform 0.2s;
+}
+
+.btn-extend:hover {
+    background: #4CAF50;
+    transform: scale(1.1);
+}
+
+.btn-extend:active {
+    transform: scale(0.95);
+}
+
+/* ========== 大文件下载提示 ========== */
+.large-download-modal {
+    z-index: 2500;
+}
+
+.large-download-content {
+    width: 460px;
+    max-width: 92vw;
+}
+
+.large-download-header {
+    background: linear-gradient(90deg, #e67e22, #f39c12);
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.large-download-name {
+    font-weight: bold;
+    font-size: 16px;
+    word-break: break-all;
+    margin-bottom: 8px;
+    color: #2c3e50;
+}
+
+.large-download-size {
+    color: #e67e22;
+    font-weight: bold;
+    margin-bottom: 12px;
+}
+
+.large-download-reason,
+.large-download-hint {
+    font-size: 14px;
+    color: #555;
+    line-height: 1.6;
+    margin-bottom: 8px;
+}
+
+.large-download-shortcut {
+    font-size: 13px;
+    color: #666;
+    background: #f5f5f5;
+    padding: 10px;
+    border-radius: 6px;
+    line-height: 1.8;
+    word-break: break-all;
+}
+
+.large-download-shortcut kbd {
+    background: #fff;
+    border: 1px solid #ccc;
+    border-bottom-width: 2px;
+    border-radius: 4px;
+    padding: 1px 5px;
+    font-family: Consolas, monospace;
+}
+
+.large-download-shortcut code {
+    color: #1565c0;
+    font-family: Consolas, monospace;
+}
+
+.large-download-actions {
+    display: flex;
+    gap: 10px;
+    justify-content: center;
+    margin-top: 14px;
+    flex-wrap: wrap;
+}
+
+.large-download-countdown {
+    text-align: center;
+    font-size: 12px;
+    color: #999;
+    margin-top: 12px;
+}
+
+/* ========== 服务器关闭兜底页 ========== */
+.server-closed-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 3000;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: rgba(20, 25, 35, 0.96);
+    color: #fff;
+}
+
+.server-closed-card {
+    text-align: center;
+    padding: 40px;
+    max-width: 520px;
+}
+
+.server-closed-card i {
+    font-size: 56px;
+    color: #f44336;
+    margin-bottom: 20px;
+}
+
+.server-closed-card h2 {
+    font-size: 28px;
+    margin-bottom: 15px;
+}
+
+.server-closed-card p {
+    font-size: 15px;
+    color: #cfd8dc;
+    margin-bottom: 8px;
+}
+
+.server-closed-hint {
+    font-size: 13px !important;
+    color: #90a4ae !important;
+}
+
+@media (max-width: 480px) {
+    .auto-shutdown {
+        gap: 6px;
+        font-size: 12px;
+        padding: 4px 8px;
+    }
+
+    .large-download-actions {
+        flex-direction: column;
+    }
+
+    .large-download-actions .btn-confirm-yes,
+    .large-download-actions .btn-secondary {
+        width: 100%;
+    }
+}
+
+.btn-confirm-close {
+    padding: 8px 24px;
+    border: none;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 14px;
+    background: #607d8b;
+    color: #fff;
+}
+
+.btn-confirm-close:hover {
+    background: #455a64;
 }
