@@ -195,6 +195,35 @@ class ChatStore:
             del self._messages[: len(self._messages) - self.memory_limit]
         return dict(message)
 
+    def get(self, message_id: str) -> dict[str, Any] | None:
+        if not message_id:
+            return None
+        for message in self._messages:
+            if message["id"] == message_id:
+                return dict(message)
+        return None
+
+    async def edit(self, message_id: str, text: str) -> dict[str, Any] | None:
+        """编辑最近内存中的消息并同步写回当天的 JSONL 文件。"""
+        if not message_id or len(message_id) > 128:
+            return None
+        cleaned = self._normalize_text(text)
+        target: dict[str, Any] | None = None
+        path: Path | None = None
+        for message in self._messages:
+            if message["id"] == message_id:
+                target = message
+                path = self._day_file(self.directory, float(message.get("timestamp") or 0))
+                break
+        if target is None:
+            return None
+        updated = dict(target)
+        updated["message"] = cleaned
+        if path is not None and path.exists():
+            await asyncio.to_thread(self._rewrite_message, path, message_id, updated)
+        target["message"] = cleaned
+        return dict(updated)
+
     async def delete(self, message_id: str) -> bool:
         if not message_id or len(message_id) > 128:
             return False
@@ -234,6 +263,37 @@ class ChatStore:
                     if message is not None:
                         return message, path
         return None, None
+
+    def _rewrite_message(self, path: Path, message_id: str, updated: dict[str, Any]) -> None:
+        tmp = path.with_name(path.name + ".tmp")
+        try:
+            with (
+                open(path, encoding="utf-8", errors="replace") as source,
+                open(tmp, "w", encoding="utf-8") as target,
+            ):
+                replaced = False
+                for line in source:
+                    if not line.strip():
+                        continue
+                    try:
+                        raw = json.loads(line)
+                    except ValueError:
+                        target.write(line)
+                        continue
+                    if isinstance(raw, dict) and str(raw.get("id")) == message_id:
+                        target.write(json.dumps(updated, ensure_ascii=False) + "\n")
+                        replaced = True
+                    else:
+                        target.write(line)
+                if not replaced:
+                    target.write(json.dumps(updated, ensure_ascii=False) + "\n")
+            os.replace(tmp, path)
+        finally:
+            try:
+                if tmp.exists():
+                    tmp.unlink()
+            except OSError:
+                pass
 
     def _rewrite_without(self, path: Path, message_id: str) -> None:
         tmp = path.with_name(path.name + ".tmp")

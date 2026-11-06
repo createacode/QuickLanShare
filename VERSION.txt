@@ -1,7 +1,7 @@
 软件名称：QuickLanShare
-版本号：3.4.0
+版本号：3.5.4
 作者：XAF
 版权：Copyright © XAF 2026.11
-构建日期：2026-11-04
+构建日期：2026-11-06
 目标平台：Windows 10 / 11 x64
 许可：生成物归使用者所有；第三方组件许可见 THIRD-PARTY-NOTICES.md

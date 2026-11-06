@@ -35,9 +35,13 @@
                     <p>手机扫码加入，极速传输</p>
                     <p id="roomUrl">加载中...</p>
                     <div class="stats">
-                        <span><i class="fas fa-user"></i> <span id="clientCount">0</span> 在线</span>
+                        <span id="onlineStat" class="online-stat" title="查看在线用户 IP 与状态"><i class="fas fa-user"></i> <span id="clientCount">0</span> 在线</span>
                         <span><i class="fas fa-comment"></i> <span id="chatCount">0</span> 消息</span>
                         <span><i class="fas fa-file"></i> <span id="fileCount">0</span> 文件</span>
+                    </div>
+                    <div id="onlinePopover" class="online-popover" style="display: none;">
+                        <div class="online-popover-title">在线用户</div>
+                        <div id="onlineUsersList" class="online-users-list">暂无在线用户</div>
                     </div>
                 </div>
             </div>
@@ -48,13 +52,31 @@
             <div class="shared-text-section">
                 <div class="shared-text-header">
                     <h3><i class="fas fa-comment"></i> 文字共享</h3>
-                    <div class="shared-text-status" id="sharedTextStatus">连接中...</div>
+                    <div class="text-header-actions">
+                        <span class="my-name">我：<span id="myName">用户</span></span>
+                        <button id="renameBtn" class="btn-text-tool" title="修改自己的用户名"><i class="fas fa-user-edit"></i> 改名</button>
+                        <div class="shared-text-status" id="sharedTextStatus">连接中...</div>
+                    </div>
                 </div>
                 <div class="latest-message" id="latestMessage">
                     <div class="message-placeholder">等待消息...</div>
                 </div>
                 <div class="message-history">
-                    <div class="history-header"><span>消息历史</span><button id="toggleHistory" class="btn-toggle"><i class="fas fa-chevron-down"></i></button></div>
+                    <div class="history-header">
+                        <span>消息历史</span>
+                        <div class="history-header-actions">
+                            <button id="manageMessagesBtn" class="btn-text-tool"><i class="fas fa-tasks"></i> 管理</button>
+                            <button id="toggleHistory" class="btn-toggle"><i class="fas fa-chevron-down"></i></button>
+                        </div>
+                    </div>
+                    <div id="msgBatchToolbar" class="msg-batch-toolbar" style="display: none;">
+                        <label class="msg-select-all"><input type="checkbox" id="msgSelectAll"> 全选</label>
+                        <span id="msgSelectedCount" class="msg-selected-count">已选 0 条</span>
+                        <div class="msg-batch-actions">
+                            <button id="batchDeleteMessagesBtn" class="btn-danger" disabled><i class="fas fa-trash-alt"></i> 删除选中</button>
+                            <button id="finishMsgManageBtn" class="btn-secondary">完成</button>
+                        </div>
+                    </div>
                     <div class="history-content" id="historyContent"><div class="empty-history">暂无消息历史</div></div>
                 </div>
                 <div class="message-input-area">
@@ -177,6 +199,22 @@
         </div>
     </div>
 
+    <!-- 修改用户名 -->
+    <div id="renameModal" class="custom-modal" style="display: none;">
+        <div class="custom-modal-content rename-modal-content">
+            <div class="custom-modal-header">修改用户名</div>
+            <div class="custom-modal-body rename-modal-body">
+                <p class="rename-hint">最多 20 个字符，修改后所有设备都会看到。</p>
+                <input type="text" id="renameInput" class="rename-input" maxlength="20" placeholder="输入新的用户名">
+                <div id="renameError" class="rename-error"></div>
+            </div>
+            <div class="custom-modal-footer">
+                <button id="renameCancelBtn" class="btn-confirm-no">取消</button>
+                <button id="renameSaveBtn" class="btn-confirm-yes">保存</button>
+            </div>
+        </div>
+    </div>
+
     <!-- 模板 -->
     <template id="fileItemTemplate">
         <div class="file-item" data-file-id="">
@@ -221,10 +259,14 @@
 
     <template id="messageItemTemplate">
         <div class="message-item" data-msg-id="">
+            <input type="checkbox" class="msg-select" title="选中此消息">
             <div class="message-header">
                 <span class="message-sender"></span>
                 <span class="message-time"></span>
-                <button class="btn-msg-delete" title="删除消息"><i class="fas fa-times-circle"></i></button>
+                <span class="msg-actions">
+                    <button class="btn-msg-edit" title="编辑消息"><i class="fas fa-edit"></i></button>
+                    <button class="btn-msg-delete" title="删除消息"><i class="fas fa-times-circle"></i></button>
+                </span>
             </div>
             <div class="message-content"></div>
         </div>

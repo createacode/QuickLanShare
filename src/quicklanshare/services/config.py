@@ -54,7 +54,7 @@ class Config:
     # 安全 / 网络
     allow_any_host: bool = False
     allowed_hosts: set[str] = field(default_factory=set)
-    ip_scope: str = "last1"
+    ip_scope: str = "all"
 
     # 杂项
     log_level: str = "INFO"

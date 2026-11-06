@@ -20,7 +20,16 @@ from aiohttp import WSMsgType, web
 from ..core.version import __author__, __copyright_ym__, __version__
 from ..utils.net import collect_local_hosts, get_local_ip, open_browser
 from ..utils.qr import qr_data_uri
-from .access import is_ip_allowed, is_loopback, normalize_ipv4
+from .access import (
+    SCOPES,
+    is_ip_allowed,
+    is_loopback,
+    normalize_ipv4,
+    normalize_scope,
+    scope_label,
+    scope_mask,
+    scope_segments,
+)
 from .chat import ChatStore, EmptyMessage, MessageTooLong
 from .config import APP_NAME, Config
 from .filenames import (
@@ -52,7 +61,14 @@ class FileTransferServer:
         self.chat = ChatStore(self.config)
         self.clients: dict[str, dict[str, Any]] = {}
         self.ip_to_name: dict[str, str] = {}
+        self._names_file = self.config.state_dir / "names.json"
+        with contextlib.suppress(OSError):
+            self._names_file.parent.mkdir(parents=True, exist_ok=True)
+        self.ip_to_name = self._load_names()
         self.user_counter = 1
+        self._upload_state: dict[str, dict[str, Any]] = {}
+        self._download_active: dict[str, int] = {}
+        self._activity: dict[str, dict[str, int]] = {}
         self.port = config.port
         self.local_ip = get_local_ip()
         self.scheme = "https" if config.ssl_cert and config.ssl_key else "http"
@@ -88,6 +104,10 @@ class FileTransferServer:
         router.add_get("/index.html", self.handle_index)
         router.add_get("/favicon.ico", self.handle_favicon)
         router.add_get("/api/room-info", self.handle_room_info)
+        router.add_get("/api/network-scope", self.handle_network_scope_state)
+        router.add_post("/api/network-scope", self.handle_update_network_scope)
+        router.add_get("/api/profile", self.handle_profile)
+        router.add_post("/api/profile/name", self.handle_rename_profile)
         router.add_get("/api/files", self.handle_list_files)
         router.add_post("/api/upload", self.handle_upload)
         router.add_post("/api/upload/init", self.handle_upload_init)
@@ -100,7 +120,9 @@ class FileTransferServer:
         router.add_post("/api/zip-download", self.handle_zip_download)
         router.add_get("/api/chat/history", self.handle_chat_history)
         router.add_post("/api/chat/send", self.handle_chat_send)
+        router.add_put("/api/chat/message/{msg_id}", self.handle_edit_chat_message)
         router.add_delete("/api/chat/message/{msg_id}", self.handle_delete_chat_message)
+        router.add_post("/api/chat/messages/delete", self.handle_delete_chat_messages)
         router.add_get("/ws", self.handle_websocket)
         router.add_post("/api/auto-shutdown/extend", self.handle_extend_auto_shutdown)
         router.add_get("/api/auto-shutdown/status", self.handle_auto_shutdown_status)
@@ -180,7 +202,10 @@ class FileTransferServer:
         return is_loopback(request.remote)
 
     def _check_ip_scope(self, request: web.Request) -> None:
-        anchor = normalize_ipv4(request.url.host) or self.local_ip
+        # 不能信任 Host 头决定放通范围：远端可伪造 127.0.0.1。请求来自本机
+        # 回环页面时，仍按真实局域网地址作为锚点。
+        host_ip = normalize_ipv4(request.url.host)
+        anchor = host_ip if host_ip and not is_loopback(host_ip) else self.local_ip
         if is_ip_allowed(anchor, request.remote, self.config.ip_scope):
             return
         logger.warning(
@@ -231,20 +256,184 @@ class FileTransferServer:
             raise web.HTTPForbidden(text="Cross-origin request blocked")
 
     # ------------------------------------------------------------- utilities
+    @staticmethod
+    def _display_ip(ip: str | None) -> str:
+        """统一回环 / IPv4-mapped 地址的展示形式。"""
+        return normalize_ipv4(ip) or str(ip or "unknown")
+
+    def _load_names(self) -> dict[str, str]:
+        try:
+            raw = json.loads(self._names_file.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {}
+        if not isinstance(raw, dict):
+            return {}
+        names: dict[str, str] = {}
+        for key, value in raw.items():
+            name = self._sanitize_name(value)
+            if name:
+                names[self._display_ip(str(key))] = name
+        return names
+
+    def _save_names(self) -> None:
+        try:
+            tmp = self._names_file.with_name(self._names_file.name + ".tmp")
+            tmp.write_text(
+                json.dumps(self.ip_to_name, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+            tmp.replace(self._names_file)
+        except OSError:
+            logger.warning("保存用户名失败: %s", self._names_file, exc_info=True)
+
+    @staticmethod
+    def _sanitize_name(value: Any) -> str:
+        if not isinstance(value, str):
+            return ""
+        text = " ".join(value.replace("\r", " ").replace("\n", " ").split())
+        return text.strip()[:20]
+
     def _name_for_ip(self, ip: str) -> str:
         if not ip:
             return "未知用户"
-        if ip not in self.ip_to_name:
-            self.ip_to_name[ip] = f"用户{self.user_counter}"
-            self.user_counter += 1
-            logger.info("用户命名: %s -> %s", ip, self.ip_to_name[ip])
-        return self.ip_to_name[ip]
+        key = self._display_ip(ip)
+        if key not in self.ip_to_name:
+            used = {
+                int(name[2:])
+                for name in self.ip_to_name.values()
+                if name.startswith("用户") and name[2:].isdigit()
+            }
+            number = 1
+            while number in used:
+                number += 1
+            self.user_counter = max(self.user_counter, number + 1)
+            self.ip_to_name[key] = f"用户{number}"
+            self._save_names()
+            logger.info("用户命名: %s -> %s", key, self.ip_to_name[key])
+        return self.ip_to_name[key]
 
     def _decorate(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
         for message in messages:
-            if not message.get("client_name"):
-                message["client_name"] = self._name_for_ip(message.get("client_ip", ""))
+            ip = message.get("client_ip", "")
+            if ip:
+                message["client_name"] = self._name_for_ip(str(ip))
+            elif not message.get("client_name"):
+                message["client_name"] = "未知用户"
         return messages
+
+    def _rename_client(self, ip: str, name: str) -> str:
+        key = self._display_ip(ip)
+        cleaned = self._sanitize_name(name)
+        if not cleaned:
+            raise ValueError("用户名不能为空")
+        self.ip_to_name[key] = cleaned
+        for client in self.clients.values():
+            if self._display_ip(str(client.get("ip") or "")) == key:
+                client["name"] = cleaned
+        self._save_names()
+        logger.info("用户改名: %s -> %s", key, cleaned)
+        return cleaned
+
+    def _client_profile(self, request: web.Request) -> dict[str, Any]:
+        ip = self._display_ip(request.remote)
+        return {"ip": ip, "name": self._name_for_ip(request.remote or "")}
+
+    @staticmethod
+    def _same_ip(left: str | None, right: str | None) -> bool:
+        return normalize_ipv4(left) == normalize_ipv4(right)
+
+    def _activity_enter(self, ip: str, kind: str) -> None:
+        key = self._display_ip(ip)
+        counters = self._activity.setdefault(key, {})
+        counters[kind] = counters.get(kind, 0) + 1
+
+    def _activity_leave(self, ip: str, kind: str) -> None:
+        key = self._display_ip(ip)
+        counters = self._activity.get(key)
+        if not counters:
+            return
+        value = max(0, counters.get(kind, 0) - 1)
+        if value:
+            counters[kind] = value
+        else:
+            counters.pop(kind, None)
+        if not counters:
+            self._activity.pop(key, None)
+
+    def _track_upload(self, upload_id: str, ip: str, name: str, size: int, offset: int) -> None:
+        self._upload_state[upload_id] = {
+            "ip": self._display_ip(ip),
+            "name": name,
+            "size": int(size),
+            "offset": max(0, int(offset)),
+            "updated": time.time(),
+        }
+
+    def _update_upload(self, upload_id: str, offset: int) -> None:
+        session = self._upload_state.get(upload_id)
+        if session is None:
+            return
+        session["offset"] = max(0, int(offset))
+        session["updated"] = time.time()
+
+    def _finish_upload(self, upload_id: str) -> None:
+        self._upload_state.pop(upload_id, None)
+
+    def _online_users(self) -> list[dict[str, Any]]:
+        """合并 WebSocket、上传会话与下载请求，给界面展示在线用户。"""
+        now = time.time()
+        names: dict[str, str] = {}
+        for client in self.clients.values():
+            ip = self._display_ip(str(client.get("ip") or ""))
+            name = str(client.get("name") or self.ip_to_name.get(ip) or "")
+            names.setdefault(ip, name)
+        uploads: dict[str, str] = {}
+        for upload_id, session in list(self._upload_state.items()):
+            if now - float(session.get("updated") or 0) > 60:
+                self._upload_state.pop(upload_id, None)
+                continue
+            ip = str(session.get("ip") or "")
+            name = str(session.get("name") or "")
+            if ip and len(name) <= 60:
+                uploads[ip] = name
+        downloads = set(self._activity)
+        for ip in downloads | set(uploads) | set(names):
+            names.setdefault(ip, self.ip_to_name.get(ip, "访客"))
+
+        users: list[dict[str, Any]] = []
+        for ip, name in names.items():
+            if ip in self._download_active or self._activity.get(ip, {}).get("download"):
+                status = "下载"
+            elif ip in uploads or self._activity.get(ip, {}).get("upload"):
+                status = "上传"
+            else:
+                status = "在线"
+            detail = ""
+            if status == "上传":
+                detail = uploads.get(ip, "")
+            elif status == "下载":
+                detail = "正在下载文件"
+            users.append(
+                {
+                    "ip": ip,
+                    "name": name,
+                    "status": status,
+                    "detail": detail,
+                    "local": is_loopback(ip),
+                }
+            )
+        users.sort(key=lambda item: (not item["local"], item["ip"]))
+        return users
+
+    def _scope_payload(self) -> dict[str, Any]:
+        scope = normalize_scope(self.config.ip_scope)
+        mask = scope_mask(scope)
+        return {
+            "scope": scope,
+            "mask": mask,
+            "segments": scope_segments(scope),
+            "server_ip": self.local_ip,
+            "label": scope_label(scope),
+        }
 
     def _public_file(self, entry: dict[str, Any]) -> dict[str, Any]:
         data = dict(entry)
@@ -299,6 +488,8 @@ class FileTransferServer:
                 self._qr_cache.clear()
                 self._qr_cache[room_url] = qr
         files = [self._public_file(entry) for entry in self.files.list_files()]
+        online_users = self._online_users()
+        profile = self._client_profile(request)
         return web.json_response(
             {
                 "room_url": room_url,
@@ -306,9 +497,13 @@ class FileTransferServer:
                 "total_files": len(files),
                 "total_size": sum(item["size"] for item in files),
                 "total_clients": len(self.clients),
+                "online_users": online_users,
                 "chat_messages": self.chat.total(),
                 "files": files,
                 "server_ip": self.local_ip,
+                "ip_scope": self._scope_payload(),
+                "client_ip": profile["ip"],
+                "client_name": profile["name"],
                 "version": __version__,
                 "author": __author__,
                 "copyright": f"Copyright © {__author__} {__copyright_ym__}",
@@ -317,6 +512,58 @@ class FileTransferServer:
                 "local_client": self._is_local_client(request),
             }
         )
+
+    async def handle_network_scope_state(self, request: web.Request) -> web.Response:
+        payload = self._scope_payload()
+        payload["local_client"] = self._is_local_client(request)
+        return web.json_response(payload)
+
+    async def handle_update_network_scope(self, request: web.Request) -> web.Response:
+        self._require_local_client(request)
+        data = await self._read_json(request)
+        scope = data.get("scope")
+        if scope not in SCOPES:
+            raise web.HTTPBadRequest(text="网段参数不合法，仅支持四档预设")
+        self.config.ip_scope = normalize_scope(str(scope))
+        payload = self._scope_payload()
+        logger.info("开放网段已热更新: %s (%s)", payload["label"], scope)
+        await self._broadcast(
+            {
+                "type": "ip_scope_changed",
+                "scope": payload["scope"],
+                "mask": payload["mask"],
+                "segments": payload["segments"],
+                "label": payload["label"],
+            }
+        )
+        await self._disconnect_disallowed_clients()
+        payload["local_client"] = True
+        payload["saved"] = True
+        return web.json_response(payload)
+
+    async def _disconnect_disallowed_clients(self) -> None:
+        """范围收紧后，立即断开已经不在范围内的长连接。"""
+        for client_id, client in list(self.clients.items()):
+            ip = str(client.get("ip") or "")
+            if is_ip_allowed(self.local_ip, ip, self.config.ip_scope):
+                continue
+            logger.info("网段收紧，断开不在范围的连接: %s (%s)", client_id, ip)
+            self.clients.pop(client_id, None)
+            with contextlib.suppress(Exception):
+                await client["ws"].close(code=1008, message=b"IP no longer allowed")
+
+    async def handle_profile(self, request: web.Request) -> web.Response:
+        return web.json_response(self._client_profile(request))
+
+    async def handle_rename_profile(self, request: web.Request) -> web.Response:
+        data = await self._read_json(request)
+        try:
+            name = self._rename_client(request.remote or "", data.get("name", ""))
+        except ValueError as exc:
+            raise web.HTTPBadRequest(text=str(exc)) from exc
+        profile = {"ip": self._display_ip(request.remote), "name": name}
+        await self._broadcast({"type": "profile_updated", **profile})
+        return web.json_response({"success": True, **profile})
 
     async def handle_list_files(self, request: web.Request) -> web.Response:
         files = [self._public_file(entry) for entry in self.files.list_files()]
@@ -334,7 +581,12 @@ class FileTransferServer:
             or not getattr(field, "filename", None)
         ):
             raise web.HTTPBadRequest(text="缺少文件字段")
-        info = await self.files.save_stream(field)
+        remote = request.remote or ""
+        self._activity_enter(remote, "upload")
+        try:
+            info = await self.files.save_stream(field)
+        finally:
+            self._activity_leave(remote, "upload")
         return web.json_response({"success": True, **self._public_file(info)})
 
     async def handle_upload_init(self, request: web.Request) -> web.Response:
@@ -351,6 +603,15 @@ class FileTransferServer:
         except (TypeError, ValueError):
             mtime_value = 0.0
         result = self.files.init_upload(filename, size, mtime_value, str(data.get("nonce", "")))
+        upload_id = result.get("upload_id")
+        if isinstance(upload_id, str) and upload_id:
+            self._track_upload(
+                upload_id,
+                request.remote or "",
+                str(result.get("name") or filename or ""),
+                size,
+                int(result.get("offset") or 0),
+            )
         return web.json_response(result)
 
     async def handle_upload_chunk(self, request: web.Request) -> web.Response:
@@ -366,16 +627,19 @@ class FileTransferServer:
         if len(data) > self.config.max_chunk_size:
             raise UploadTooLarge("单个分片过大")
         new_offset = await self.files.append_chunk(upload_id, offset, data)
+        self._update_upload(upload_id, new_offset)
         return web.json_response({"upload_id": upload_id, "offset": new_offset})
 
     async def handle_upload_complete(self, request: web.Request) -> web.Response:
         upload_id = request.match_info["upload_id"]
         info = await self.files.complete_upload(upload_id)
+        self._finish_upload(upload_id)
         return web.json_response({"success": True, **self._public_file(info)})
 
     async def handle_upload_abort(self, request: web.Request) -> web.Response:
         upload_id = request.match_info["upload_id"]
         self.files.abort_upload(upload_id)
+        self._finish_upload(upload_id)
         return web.json_response({"success": True})
 
     # -------------------------------------------------------------- download
@@ -387,10 +651,19 @@ class FileTransferServer:
         logger.info(
             "下载 %s (%s) 来自 %s", file_id, self.files.counts.get(file_id, 0), request.remote
         )
+        remote = self._display_ip(request.remote)
         self.active_downloads += 1
+        self._download_active[remote] = self._download_active.get(remote, 0) + 1
+        self._activity_enter(remote, "download")
         try:
             return await stream_download(request, path, file_id)
         finally:
+            self._activity_leave(remote, "download")
+            remaining = max(0, self._download_active.get(remote, 0) - 1)
+            if remaining:
+                self._download_active[remote] = remaining
+            else:
+                self._download_active.pop(remote, None)
             self.active_downloads = max(0, self.active_downloads - 1)
 
     async def handle_delete(self, request: web.Request) -> web.Response:
@@ -462,7 +735,20 @@ class FileTransferServer:
         stream = StreamingZip(
             entries, zip_name, compression=compression_code(self.config.zip_compression)
         )
-        return await stream.stream(request)
+        remote = self._display_ip(request.remote)
+        self.active_downloads += 1
+        self._download_active[remote] = self._download_active.get(remote, 0) + 1
+        self._activity_enter(remote, "download")
+        try:
+            return await stream.stream(request)
+        finally:
+            self._activity_leave(remote, "download")
+            remaining = max(0, self._download_active.get(remote, 0) - 1)
+            if remaining:
+                self._download_active[remote] = remaining
+            else:
+                self._download_active.pop(remote, None)
+            self.active_downloads = max(0, self.active_downloads - 1)
 
     # ------------------------------------------------------------------ chat
     async def handle_chat_history(self, request: web.Request) -> web.Response:
@@ -471,8 +757,26 @@ class FileTransferServer:
     async def handle_chat_send(self, request: web.Request) -> web.Response:
         data = await self._read_json(request)
         remote = request.remote or "unknown"
-        message = await self.chat.add(self._name_for_ip(remote), remote, data.get("message", ""))
+        ip = self._display_ip(remote)
+        message = await self.chat.add(self._name_for_ip(remote), ip, data.get("message", ""))
         await self._broadcast({"type": "chat_message", "message": message})
+        return web.json_response({"success": True, "message": message})
+
+    async def handle_edit_chat_message(self, request: web.Request) -> web.Response:
+        message_id = request.match_info["msg_id"]
+        existing = self.chat.get(message_id)
+        if existing is None:
+            raise web.HTTPNotFound(text="消息不存在")
+        if not self._is_local_client(request) and not self._same_ip(
+            existing.get("client_ip"), request.remote
+        ):
+            raise web.HTTPForbidden(text="只能编辑自己发送的消息")
+        data = await self._read_json(request)
+        message = await self.chat.edit(message_id, data.get("message", ""))
+        if message is None:
+            raise web.HTTPNotFound(text="消息不存在")
+        message["client_name"] = self._name_for_ip(str(message.get("client_ip") or ""))
+        await self._broadcast({"type": "edit_message", "message": message})
         return web.json_response({"success": True, "message": message})
 
     async def handle_delete_chat_message(self, request: web.Request) -> web.Response:
@@ -481,6 +785,23 @@ class FileTransferServer:
             raise web.HTTPNotFound(text="消息不存在")
         await self._broadcast({"type": "delete_message", "message_id": message_id})
         return web.json_response({"success": True})
+
+    async def handle_delete_chat_messages(self, request: web.Request) -> web.Response:
+        data = await self._read_json(request)
+        ids = data.get("ids")
+        if not isinstance(ids, list) or not ids:
+            raise web.HTTPBadRequest(text="ids 必须是非空数组")
+        if len(ids) > 200:
+            raise web.HTTPBadRequest(text="单次最多删除 200 条消息")
+        deleted: list[str] = []
+        for raw in ids:
+            if not isinstance(raw, str) or not raw:
+                continue
+            if await self.chat.delete(raw):
+                deleted.append(raw)
+        if deleted:
+            await self._broadcast({"type": "delete_messages", "message_ids": deleted})
+        return web.json_response({"success": True, "deleted": deleted})
 
     async def _broadcast(self, payload: dict[str, Any]) -> None:
         targets = list(self.clients.items())
@@ -503,8 +824,9 @@ class FileTransferServer:
         await ws.prepare(request)
         client_id = f"client_{int(time.time() * 1000)}_{uuid.uuid4().hex[:6]}"
         remote = request.remote or "unknown"
+        client_ip = self._display_ip(remote)
         name = self._name_for_ip(remote)
-        self.clients[client_id] = {"ws": ws, "ip": remote, "name": name}
+        self.clients[client_id] = {"ws": ws, "ip": client_ip, "name": name}
         logger.info("WebSocket 连接: %s (%s)", client_id, remote)
         try:
             await ws.send_json(
@@ -527,7 +849,7 @@ class FileTransferServer:
                 if not isinstance(data, dict) or data.get("type") != "chat_message":
                     continue
                 try:
-                    chat_message = await self.chat.add(name, remote, data.get("message", ""))
+                    chat_message = await self.chat.add(name, client_ip, data.get("message", ""))
                 except (EmptyMessage, MessageTooLong) as exc:
                     await ws.send_json({"type": "error", "error": str(exc)})
                     continue

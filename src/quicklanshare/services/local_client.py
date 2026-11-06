@@ -93,6 +93,50 @@ class LocalShareClient:
         ):
             return await self._json(response)
 
+    async def network_scope(self) -> dict[str, Any]:
+        async with (
+            aiohttp.ClientSession(timeout=self._timeout()) as session,
+            session.get(
+                f"{self.base_url}/api/network-scope",
+                ssl=self._ssl,
+                headers={"Accept": "application/json"},
+            ) as response,
+        ):
+            return await self._json(response)
+
+    async def set_network_scope(self, scope: str) -> dict[str, Any]:
+        async with (
+            aiohttp.ClientSession(timeout=self._timeout()) as session,
+            session.post(
+                f"{self.base_url}/api/network-scope",
+                json={"scope": scope},
+                ssl=self._ssl,
+            ) as response,
+        ):
+            return await self._json(response)
+
+    async def profile(self) -> dict[str, Any]:
+        async with (
+            aiohttp.ClientSession(timeout=self._timeout()) as session,
+            session.get(
+                f"{self.base_url}/api/profile",
+                ssl=self._ssl,
+                headers={"Accept": "application/json"},
+            ) as response,
+        ):
+            return await self._json(response)
+
+    async def rename_profile(self, name: str) -> dict[str, Any]:
+        async with (
+            aiohttp.ClientSession(timeout=self._timeout()) as session,
+            session.post(
+                f"{self.base_url}/api/profile/name",
+                json={"name": name},
+                ssl=self._ssl,
+            ) as response,
+        ):
+            return await self._json(response)
+
     async def list_files(self) -> list[dict[str, Any]]:
         async with (
             aiohttp.ClientSession(timeout=self._timeout()) as session,
@@ -355,6 +399,24 @@ class LocalShareClient:
             raise LocalClientError("服务端未返回消息")
         return created
 
+    async def edit_chat(self, message_id: str, text: str) -> dict[str, Any]:
+        """编辑一条聊天消息，返回服务端更新后的消息。"""
+        if not message_id:
+            raise LocalClientError("消息 ID 为空")
+        async with (
+            aiohttp.ClientSession(timeout=self._timeout()) as session,
+            session.put(
+                f"{self.base_url}/api/chat/message/{quote(message_id, safe='')}",
+                json={"message": text},
+                ssl=self._ssl,
+            ) as response,
+        ):
+            payload = await self._json(response)
+        message = payload.get("message")
+        if not isinstance(message, dict):
+            raise LocalClientError("服务端未返回编辑后的消息")
+        return message
+
     async def delete_chat(self, message_id: str) -> None:
         """删除一条聊天消息。"""
         if not message_id:
@@ -367,3 +429,22 @@ class LocalShareClient:
             ) as response,
         ):
             await self._json(response)
+
+    async def delete_chat_messages(self, message_ids: list[str]) -> list[str]:
+        """批量删除聊天消息，返回服务端实际删除的 id。"""
+        ids = [item for item in message_ids if isinstance(item, str) and item]
+        if not ids:
+            return []
+        async with (
+            aiohttp.ClientSession(timeout=self._timeout()) as session,
+            session.post(
+                f"{self.base_url}/api/chat/messages/delete",
+                json={"ids": ids},
+                ssl=self._ssl,
+            ) as response,
+        ):
+            payload = await self._json(response)
+        deleted = payload.get("deleted")
+        if not isinstance(deleted, list):
+            return []
+        return [item for item in deleted if isinstance(item, str)]

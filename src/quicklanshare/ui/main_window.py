@@ -15,9 +15,9 @@ import sys
 import time
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 
-from PySide6.QtCore import QEasingCurve, QObject, QRect, QSize, Qt, QTimer, QUrl, Signal
+from PySide6.QtCore import QEasingCurve, QObject, QPoint, QRect, QSize, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QAction, QCloseEvent, QDesktopServices, QGuiApplication
 from PySide6.QtWidgets import (
     QApplication,
@@ -39,6 +39,7 @@ from PySide6.QtWidgets import (
 )
 
 from ..core.version import __software_name__, __version__, window_title
+from ..services.access import SCOPE_LABELS, SCOPES, is_loopback
 from ..services.autostart import AutostartError, apply_autostart
 from ..services.config import Config
 from ..services.download_registry import DownloadRegistry
@@ -46,6 +47,7 @@ from ..utils.app_config import AppConfig, apply_window_geometry, save_config
 from ..utils.downloads import desktop_dir, resolve_download_dir, unique_download_path
 from ..utils.format import human_size, human_time
 from ..utils.logging_setup import LoggingSession, set_log_level
+from ..utils.net import get_local_ip
 from ..utils.paths import app_base_dir, default_data_dir
 from . import icons, theme
 from .about_dialog import AboutDialog
@@ -53,6 +55,7 @@ from .backend import Backend
 from .connection_popup import ConnectionPopup
 from .logs_drawer import LogsDrawer
 from .qr_overlay import QrButton, QrOverlay, QrPeek, qr_pixmap
+from .scope_control import NetworkScopeControl
 from .settings_dialog import SettingsDialog
 from .text_panel import TextPanel
 from .widgets import (
@@ -122,9 +125,12 @@ class MainWindow(QMainWindow):
         self._pending_downloads: dict[str, Path] = {}
         self._download_registry = DownloadRegistry(self._data_dir / "state" / "downloads.json")
         self._downloaded: dict[str, Path] = self._download_registry.all()
+        self._online_users: list[dict[str, Any]] = []
+        self._syncing_scope = False
 
         self.backend = Backend(self)
         self._build_ui()
+        self.text_panel.set_display_name(self.app_config.ui.share_name or "访客")
         self._setup_tray()
         self._restore_geometry()
         self._connect_signals()
@@ -214,7 +220,7 @@ class MainWindow(QMainWindow):
     def _build_header(self) -> QWidget:
         header = QWidget()
         header.setObjectName("Header")
-        header.setFixedHeight(64)
+        header.setFixedHeight(76)
         layout = QHBoxLayout(header)
         layout.setContentsMargins(20, 8, 20, 8)
         layout.setSpacing(8)
@@ -259,6 +265,11 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.qr_button)
         layout.addStretch(1)
 
+        self.scope_control = NetworkScopeControl()
+        self.scope_control.set_server_ip(self._server_ip_hint())
+        self.scope_control.set_scope(self.app_config.server.ip_scope, animate=False)
+        layout.addWidget(self.scope_control)
+
         self.open_web_button = QPushButton("打开网页")
         self.open_web_button.setProperty("role", "soft")
         self.open_web_button.setIcon(icons.glyph_icon("globe", size=15, color=theme.ACCENT))
@@ -275,6 +286,16 @@ class MainWindow(QMainWindow):
         self.power_button.setCursor(Qt.CursorShape.PointingHandCursor)
         self.power_button.setToolTip("启动服务")
         layout.addWidget(self.power_button)
+
+        self.restart_button = QPushButton()
+        self.restart_button.setProperty("role", "icon")
+        self.restart_button.setIcon(icons.glyph_icon("refresh", size=15))
+        self.restart_button.setIconSize(QSize(15, 15))
+        self.restart_button.setFixedSize(34, 34)
+        self.restart_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.restart_button.setToolTip("重启服务")
+        self.restart_button.setEnabled(False)
+        layout.addWidget(self.restart_button)
 
         self.settings_button = QPushButton()
         self.settings_button.setProperty("role", "icon")
@@ -393,8 +414,10 @@ class MainWindow(QMainWindow):
         self.data_button.setToolTip(str(self._data_dir / "uploads"))
         layout.addWidget(self.data_button)
         layout.addWidget(self._dot())
-        self.status_online = QLabel("在线 0")
-        self.status_online.setObjectName("Muted")
+        self.status_online = QPushButton("在线 0")
+        self.status_online.setProperty("role", "link")
+        self.status_online.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.status_online.setToolTip("查看在线用户 IP 与当前状态")
         layout.addWidget(self.status_online)
         layout.addWidget(self._dot())
         self.status_countdown = QLabel("未启动")
@@ -450,6 +473,9 @@ class MainWindow(QMainWindow):
         self.address_button.clicked.connect(self.open_connection_popup)
         self.open_web_button.clicked.connect(self.open_web)
         self.power_button.clicked.connect(self._on_service_button)
+        self.restart_button.clicked.connect(self.restart_server)
+        self.scope_control.scopeCommitted.connect(self._on_scope_committed)
+        self.status_online.clicked.connect(self._show_online_users)
         self.settings_button.clicked.connect(self.open_settings)
         self.connection_popup.copyRequested.connect(self.copy_share_url)
         self.connection_popup.openWebRequested.connect(self.open_web)
@@ -462,6 +488,9 @@ class MainWindow(QMainWindow):
 
         self.text_panel.sendRequested.connect(self.backend.send_chat)
         self.text_panel.deleteRequested.connect(self.backend.delete_chat)
+        self.text_panel.deleteManyRequested.connect(self.backend.delete_chat_messages)
+        self.text_panel.editRequested.connect(self.backend.edit_chat)
+        self.text_panel.renameRequested.connect(self._rename_self)
         self.text_panel.historyRefreshRequested.connect(self.backend.refresh_chat)
 
         self.backend.started.connect(self._on_started)
@@ -482,8 +511,12 @@ class MainWindow(QMainWindow):
         self.backend.chat_history.connect(self.text_panel.set_history)
         self.backend.chat_message.connect(self.text_panel.append_message)
         self.backend.chat_deleted.connect(self.text_panel.remove_message)
+        self.backend.chat_bulk_deleted.connect(self.text_panel.remove_messages)
+        self.backend.chat_edited.connect(self.text_panel.edit_message)
         self.backend.chat_status.connect(self.text_panel.set_sync_status)
         self.backend.chat_error.connect(self._on_chat_error)
+        self.backend.profile_updated.connect(self._on_profile_updated)
+        self.backend.scope_updated.connect(self._on_scope_updated)
 
     def _install_log_bridge(self) -> None:
         self._log_emitter.message.connect(self.log_panel.append_message)
@@ -540,6 +573,8 @@ class MainWindow(QMainWindow):
             return
         self._set_status("busy", "正在启动…")
         self.power_button.setEnabled(False)
+        self.restart_button.setEnabled(False)
+        self.scope_control.setEnabled(False)
         self._set_empty_state("正在加载", "正在启动共享服务…", glyph="clock", action=None)
         self.file_stack.setCurrentWidget(self.empty_state)
         logger.info("正在启动服务（端口 %s）", self.app_config.server.port)
@@ -557,6 +592,37 @@ class MainWindow(QMainWindow):
             self.toast.show_message(config.fallback_reason, duration=4200)
         if not self.backend.start_server(config):
             self.power_button.setEnabled(True)
+
+    def restart_server(self) -> None:
+        """停止后立即重新启动；有传输任务时先确认。"""
+        if not self.backend.is_running:
+            self.start_server()
+            return
+        if self.backend.active_transfers > 0 and not self._confirm(
+            "重启服务",
+            f"还有 {self.backend.active_transfers} 个传输任务未完成，重启会中断它们。确定重启吗？",
+            "重启",
+            danger=True,
+        ):
+            return
+        self._pending_restart = True
+        self.power_button.setEnabled(False)
+        self.restart_button.setEnabled(False)
+        self.scope_control.setEnabled(False)
+        self._set_status("busy", "正在重启…")
+        logger.info("用户请求重启服务")
+        self.backend.stop_server("restart")
+
+    def _server_ip_hint(self) -> str:
+        url = self._share_url or self.backend.share_url
+        if url:
+            try:
+                host = urlsplit(url).hostname
+                if host:
+                    return host
+            except ValueError:
+                pass
+        return get_local_ip()
 
     def _build_server_config(self) -> Config:
         server = self.app_config.server
@@ -593,21 +659,23 @@ class MainWindow(QMainWindow):
         self.qr_button.setIcon(qr_pixmap(share_url, 22))
         self.qr_button.setEnabled(True)
         self.qr_button.setToolTip("")
+        self.scope_control.set_server_ip(self._server_ip_hint())
         self._set_running(True)
         self._set_status("ok", "运行中")
         self.text_panel.set_service_available(True)
         logger.info("服务已就绪：%s", share_url)
-        self.toast.show_message("服务已启动，局域网内可扫码访问")
-        if self._start_hidden and self._tray_available:
-            self.tray.showMessage(
-                __software_name__,
-                "已在后台运行，双击托盘图标打开主界面。",
-                QSystemTrayIcon.MessageIcon.Information,
-                3000,
-            )
+        if not self._start_hidden:
+            self.toast.show_message("服务已启动，局域网内可扫码访问")
+        else:
+            logger.info("静默启动：不弹出通知、不自动打开网页")
         self.load_files(show_skeleton=True)
         self.backend.refresh_room_info()
-        if self.app_config.server.open_browser:
+        self.backend.refresh_scope()
+        if self.app_config.ui.share_name:
+            self.backend.rename_profile(self.app_config.ui.share_name, quiet=True)
+        else:
+            self.backend.refresh_profile()
+        if self.app_config.server.open_browser and not self._start_hidden:
             self.open_web()
 
     def _on_start_failed(self, message: str) -> None:
@@ -649,7 +717,8 @@ class MainWindow(QMainWindow):
             self._finalize_quit()
             return
         if reason == "auto-shutdown":
-            self.toast.show_message("已到自动关闭时间，程序即将退出", duration=3200)
+            if not self._start_hidden:
+                self.toast.show_message("已到自动关闭时间，程序即将退出", duration=3200)
             self._quitting = True
             self._save_settings()
             QTimer.singleShot(600, self._finalize_quit)
@@ -667,7 +736,8 @@ class MainWindow(QMainWindow):
             mode="start",
         )
         self.file_stack.setCurrentWidget(self.empty_state)
-        self.toast.show_message("服务已停止")
+        if not self._start_hidden:
+            self.toast.show_message("服务已停止")
 
     def _on_service_button(self) -> None:
         if self.backend.is_running:
@@ -679,6 +749,8 @@ class MainWindow(QMainWindow):
             ):
                 return
             self.power_button.setEnabled(False)
+            self.restart_button.setEnabled(False)
+            self.scope_control.setEnabled(False)
             self._set_status("busy", "正在停止…")
             logger.info("用户请求停止服务")
             self.backend.stop_server("user-stop")
@@ -741,6 +813,14 @@ class MainWindow(QMainWindow):
             updated.ui.autostart = False
             updated.ui.autostart_silent = False
             self._save_settings()
+        scope_changed = previous.server.ip_scope != updated.server.ip_scope
+        if scope_changed:
+            self._syncing_scope = True
+            self.scope_control.set_scope(updated.server.ip_scope)
+            self._syncing_scope = False
+            if self.backend.is_running:
+                self.backend.apply_network_scope(updated.server.ip_scope)
+                logger.info("设置中的开放网段已热更新：%s", updated.server.ip_scope)
         port_changed = previous.server.port != updated.server.port
         if port_changed:
             if self.backend.is_running:
@@ -1023,6 +1103,92 @@ class MainWindow(QMainWindow):
         else:
             self._apply_files(self._files)
 
+    # ============================================================== online/users
+    def _show_online_users(self) -> None:
+        menu = QMenu(self)
+        header = QAction(f"在线用户（{len(self._online_users)}）", menu)
+        header.setEnabled(False)
+        menu.addAction(header)
+        if not self._online_users:
+            empty = QAction("暂无在线用户", menu)
+            empty.setEnabled(False)
+            menu.addAction(empty)
+        else:
+            for user in self._online_users:
+                name = str(user.get("name") or "访客")
+                ip = str(user.get("ip") or "未知 IP")
+                status = str(user.get("status") or "在线")
+                detail = str(user.get("detail") or "")
+                text = f"{name}  ·  {ip}  ·  {status}"
+                if detail and status == "上传":
+                    text += f"：{detail}"
+                action = QAction(text, menu)
+                icon_name = {"上传": "upload", "下载": "download"}.get(status, "phone")
+                action.setIcon(icons.glyph_icon(icon_name, size=14))
+                action.setEnabled(False)
+                menu.addAction(action)
+        menu.addSeparator()
+        refresh = QAction("刷新", menu)
+        refresh.triggered.connect(self.backend.refresh_room_info)
+        menu.addAction(refresh)
+        point = self.status_online.mapToGlobal(QPoint(0, -menu.sizeHint().height() - 4))
+        menu.exec(point)
+
+    def _rename_self(self, name: str) -> None:
+        cleaned = str(name or "").strip()[:20]
+        if not cleaned:
+            self.toast.show_message("用户名不能为空")
+            return
+        self.app_config.ui.share_name = cleaned
+        self._save_settings()
+        self.text_panel.set_display_name(cleaned)
+        self.backend.rename_profile(cleaned)
+
+    def _on_profile_updated(self, payload: dict[str, Any]) -> None:
+        ip = str(payload.get("ip") or "")
+        name = str(payload.get("name") or "")
+        if not name:
+            return
+        self.text_panel.update_sender(ip, name)
+        if is_loopback(ip):
+            self.text_panel.set_display_name(name)
+            if self.app_config.ui.share_name != name:
+                self.app_config.ui.share_name = name
+                self._save_settings()
+
+    # ================================================================== scope
+    def _on_scope_committed(self, scope: str) -> None:
+        """拨杆松手：运行中热更新；服务停止时只保存，下次启动生效。"""
+        if self._syncing_scope:
+            return
+        scope = scope if scope in SCOPES else "all"
+        previous = self.app_config.server.ip_scope
+        if previous == scope:
+            return
+        self.app_config.server.ip_scope = scope
+        self._save_settings()
+        label = SCOPE_LABELS.get(scope, "全部开放")
+        if self.backend.is_running:
+            logger.info("开放网段已更新：%s", label)
+            self.backend.apply_network_scope(scope)
+            self.toast.show_message(f"开放网段已更新：{label}")
+        else:
+            logger.info("开放网段已保存：%s", label)
+            self.toast.show_message(f"开放网段已保存：{label}，启动服务后生效")
+
+    def _on_scope_updated(self, payload: dict[str, Any]) -> None:
+        scope = str(payload.get("scope") or "")
+        if scope not in SCOPES:
+            scope = "all"
+        if self.scope_control.scope != scope:
+            self._syncing_scope = True
+            self.scope_control.set_scope(scope)
+            self._syncing_scope = False
+        if self.app_config.server.ip_scope != scope:
+            self.app_config.server.ip_scope = scope
+            self._save_settings()
+            logger.info("同步开放网段设置：%s", scope)
+
     # ================================================================ statuses
     def _set_running(self, running: bool) -> None:
         self.drop_zone.setEnabled(running)
@@ -1032,6 +1198,10 @@ class MainWindow(QMainWindow):
         self.zip_button.setEnabled(running and checked > 0)
         self.delete_button.setEnabled(running and checked > 0)
         self.power_button.setEnabled(True)
+        self.restart_button.setEnabled(running)
+        self.scope_control.setEnabled(True)
+        if self.scope_control.scope != self.app_config.server.ip_scope:
+            self.scope_control.set_scope(self.app_config.server.ip_scope)
         if running:
             self.power_button.setIcon(icons.glyph_icon("power", size=15, color=theme.DANGER))
             self.power_button.setToolTip("停止服务")
@@ -1077,10 +1247,35 @@ class MainWindow(QMainWindow):
         self.toast.show_message(f"自动关闭{state}")
 
     def _on_room_updated(self, info: dict[str, Any]) -> None:
-        online = int(info.get("total_clients") or 0)
+        users = info.get("online_users")
+        if isinstance(users, list):
+            self._online_users = [item for item in users if isinstance(item, dict)]
+        else:
+            self._online_users = []
+        online = len(self._online_users) or int(info.get("total_clients") or 0)
         files = int(info.get("total_files") or 0)
         self.status_online.setText(f"在线 {online}")
+        if self._online_users:
+            summary = "、".join(
+                f"{item.get('name') or '访客'}({item.get('ip') or '?'}·{item.get('status') or '在线'})"
+                for item in self._online_users[:4]
+            )
+            if len(self._online_users) > 4:
+                summary += "…"
+            self.status_online.setToolTip(f"{summary}\n点击查看完整列表")
+        else:
+            self.status_online.setToolTip("暂无在线用户")
         self.connection_popup.set_online(online)
+        scope_info = info.get("ip_scope")
+        if isinstance(scope_info, dict):
+            self._on_scope_updated(scope_info)
+        if info.get("local_client") and info.get("client_name"):
+            name = str(info["client_name"])
+            if self.text_panel.display_name != name:
+                self.text_panel.set_display_name(name)
+            if self.app_config.ui.share_name != name:
+                self.app_config.ui.share_name = name
+                self._save_settings()
         if (
             files != len(self._files)
             and self.backend.is_running
@@ -1112,6 +1307,8 @@ class MainWindow(QMainWindow):
     def _on_operation_failed(self, message: str) -> None:
         logger.error(message)
         self.toast.show_message(message, duration=3600)
+        if "开放网段" in message and self.backend.is_running:
+            self.backend.refresh_scope()
 
     def _on_chat_error(self, message: str) -> None:
         logger.warning(message)
@@ -1237,6 +1434,9 @@ class MainWindow(QMainWindow):
 
     def resizeEvent(self, event: Any) -> None:
         super().resizeEvent(event)
+        if getattr(self, "scope_control", None) is not None:
+            # 顶部横向空间不足时隐藏网段控件，避免挤压其它按钮。
+            self.scope_control.setVisible(self.width() >= 1180)
         if getattr(self, "toast", None) is not None:
             self.toast.reposition()
         if getattr(self, "log_drawer", None) is not None:

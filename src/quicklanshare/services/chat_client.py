@@ -19,6 +19,10 @@ logger = logging.getLogger("quicklanshare.chat.client")
 HistoryCallback = Callable[[list[dict[str, Any]]], None]
 MessageCallback = Callable[[dict[str, Any]], None]
 DeletedCallback = Callable[[str], None]
+BulkDeletedCallback = Callable[[list[str]], None]
+EditedCallback = Callable[[dict[str, Any]], None]
+ProfileCallback = Callable[[dict[str, Any]], None]
+ScopeCallback = Callable[[dict[str, Any]], None]
 StatusCallback = Callable[[str], None]
 
 
@@ -34,6 +38,10 @@ class ChatSocketClient:
         on_deleted: DeletedCallback,
         on_status: StatusCallback,
         on_shutdown: Callable[[str], None] | None = None,
+        on_bulk_deleted: BulkDeletedCallback | None = None,
+        on_edited: EditedCallback | None = None,
+        on_profile: ProfileCallback | None = None,
+        on_scope: ScopeCallback | None = None,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         if self.base_url.startswith("https://"):
@@ -47,6 +55,10 @@ class ChatSocketClient:
         self._on_deleted = on_deleted
         self._on_status = on_status
         self._on_shutdown = on_shutdown
+        self._on_bulk_deleted = on_bulk_deleted
+        self._on_edited = on_edited
+        self._on_profile = on_profile
+        self._on_scope = on_scope
         self._closed = False
 
     async def run(self) -> None:
@@ -117,6 +129,24 @@ class ChatSocketClient:
             message_id = payload.get("message_id")
             if isinstance(message_id, str) and message_id:
                 self._on_deleted(message_id)
+        elif event == "delete_messages":
+            ids = payload.get("message_ids")
+            if isinstance(ids, list) and self._on_bulk_deleted is not None:
+                deleted = [item for item in ids if isinstance(item, str) and item]
+                if deleted:
+                    self._on_bulk_deleted(deleted)
+        elif event == "edit_message":
+            message = payload.get("message")
+            if isinstance(message, dict) and self._on_edited is not None:
+                self._on_edited(message)
+        elif event == "profile_updated":
+            if self._on_profile is not None:
+                self._on_profile(
+                    {"ip": str(payload.get("ip") or ""), "name": str(payload.get("name") or "")}
+                )
+        elif event == "ip_scope_changed":
+            if self._on_scope is not None:
+                self._on_scope(payload)
         elif event == "server_shutdown":
             self._closed = True
             self._notify("offline")

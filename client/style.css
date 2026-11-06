@@ -1210,3 +1210,294 @@ footer {
 .btn-confirm-close:hover {
     background: #455a64;
 }
+
+/* ========== 在线用户 / 改名 / 消息管理 ========== */
+.room-info {
+    position: relative;
+}
+
+.online-stat {
+    cursor: pointer;
+}
+
+.online-stat:hover {
+    background: rgba(255, 255, 255, 0.25);
+}
+
+.online-popover {
+    position: absolute;
+    right: 0;
+    top: calc(100% + 8px);
+    width: min(420px, 88vw);
+    max-height: 300px;
+    overflow-y: auto;
+    background: #fff;
+    color: #333;
+    border-radius: 10px;
+    box-shadow: 0 10px 30px rgba(0, 0, 0, 0.28);
+    padding: 12px;
+    z-index: 50;
+}
+
+.online-popover-title {
+    font-weight: 700;
+    color: #2c3e50;
+    margin-bottom: 8px;
+}
+
+.online-users-list {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.online-user {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+    padding: 7px 9px;
+    background: #f7f9fc;
+    border-radius: 7px;
+    font-size: 13px;
+}
+
+.online-user-name {
+    font-weight: 600;
+    color: #3f51b5;
+}
+
+.online-user-ip {
+    font-family: Consolas, monospace;
+    color: #555;
+}
+
+.online-user-status {
+    margin-left: auto;
+    padding: 2px 8px;
+    border-radius: 10px;
+    font-size: 12px;
+}
+
+.status-idle {
+    background: #e8f5e9;
+    color: #2e7d32;
+}
+
+.status-upload {
+    background: #fff3e0;
+    color: #e65100;
+}
+
+.status-download {
+    background: #e3f2fd;
+    color: #1565c0;
+}
+
+.online-detail {
+    flex-basis: 100%;
+    font-size: 11px;
+    color: #777;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.online-empty {
+    padding: 10px 4px;
+    color: #999;
+    font-size: 13px;
+}
+
+.text-header-actions,
+.history-header-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.my-name {
+    font-size: 12px;
+    opacity: 0.9;
+    max-width: 150px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.btn-text-tool {
+    background: rgba(255, 255, 255, 0.18);
+    color: inherit;
+    border: none;
+    border-radius: 12px;
+    padding: 4px 9px;
+    font-size: 12px;
+    cursor: pointer;
+}
+
+.history-header .btn-text-tool {
+    background: #e8ecf8;
+    color: #3f51b5;
+}
+
+.btn-text-tool:hover {
+    background: rgba(255, 255, 255, 0.32);
+}
+
+.history-header .btn-text-tool:hover {
+    background: #dbe2f7;
+}
+
+.msg-batch-toolbar {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+    padding: 8px 20px;
+    background: #eef2ff;
+    border-bottom: 1px solid #dfe5f5;
+    font-size: 13px;
+}
+
+.msg-select-all {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    color: #444;
+}
+
+.msg-selected-count {
+    color: #666;
+}
+
+.msg-batch-actions {
+    margin-left: auto;
+    display: flex;
+    gap: 8px;
+}
+
+.msg-batch-actions .btn-danger,
+.msg-batch-actions .btn-secondary {
+    padding: 5px 10px;
+    font-size: 12px;
+}
+
+.msg-batch-actions button:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+.msg-select {
+    position: absolute;
+    left: 0;
+    top: 14px;
+    width: 15px;
+    height: 15px;
+    cursor: pointer;
+}
+
+.message-item.managing {
+    padding-left: 24px;
+}
+
+.msg-actions {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+}
+
+.btn-msg-edit {
+    background: none;
+    border: none;
+    color: #ccc;
+    cursor: pointer;
+    font-size: 13px;
+    opacity: 0;
+    transition: opacity 0.2s;
+}
+
+.message-item:hover .btn-msg-edit {
+    opacity: 1;
+}
+
+.btn-msg-edit:hover {
+    color: #3f51b5;
+}
+
+.message-editor {
+    padding-left: 5px;
+}
+
+.message-edit-input {
+    width: 100%;
+    min-height: 64px;
+    resize: vertical;
+    border: 1px solid #c7d2fe;
+    border-radius: 7px;
+    padding: 8px;
+    font-family: inherit;
+    font-size: 14px;
+    line-height: 1.4;
+}
+
+.message-edit-actions {
+    display: flex;
+    gap: 8px;
+    margin-top: 6px;
+}
+
+.message-edit-actions button {
+    padding: 5px 12px;
+    font-size: 12px;
+}
+
+.rename-modal-content {
+    width: 360px;
+}
+
+.rename-modal-body {
+    text-align: left;
+}
+
+.rename-hint {
+    font-size: 13px;
+    color: #666;
+    margin-bottom: 10px;
+}
+
+.rename-input {
+    width: 100%;
+    padding: 9px 12px;
+    border: 1px solid #cfd8e3;
+    border-radius: 7px;
+    font-size: 14px;
+}
+
+.rename-error {
+    color: #f44336;
+    font-size: 12px;
+    min-height: 18px;
+    margin-top: 6px;
+}
+
+.rename-modal-content .btn-confirm-no {
+    background: #6c757d;
+}
+
+@media (max-width: 768px) {
+    .my-name {
+        max-width: 90px;
+    }
+
+    .online-popover {
+        position: fixed;
+        left: 4vw;
+        right: 4vw;
+        top: 110px;
+        width: 92vw;
+    }
+
+    .history-header {
+        gap: 8px;
+    }
+}

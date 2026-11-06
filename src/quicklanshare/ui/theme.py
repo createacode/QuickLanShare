@@ -189,6 +189,25 @@ QFrame#OtherBubble {{
     border: 1px solid {BORDER};
     border-radius: 12px;
 }}
+QFrame#ScopeControl {{
+    background-color: {SURFACE_MUTED};
+    border: 1px solid {BORDER};
+    border-radius: 10px;
+}}
+QLabel#ScopeTitle {{
+    color: {TEXT_SECONDARY};
+    font-size: 11px;
+    font-weight: 600;
+}}
+QLabel#ScopeDigit {{
+    color: {TEXT_MUTED};
+    font-size: 9px;
+}}
+QFrame#ManageBar {{
+    background-color: {SURFACE_MUTED};
+    border: 1px solid {BORDER};
+    border-radius: 8px;
+}}
 QFrame#Composer {{
     background-color: {SURFACE_MUTED};
     border: 1px solid {BORDER};

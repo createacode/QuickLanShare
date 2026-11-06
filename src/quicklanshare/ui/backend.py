@@ -50,8 +50,12 @@ class Backend(QObject):
     chat_history = Signal(list)
     chat_message = Signal(dict)
     chat_deleted = Signal(str)
+    chat_bulk_deleted = Signal(list)
+    chat_edited = Signal(dict)
     chat_status = Signal(str)
     chat_error = Signal(str)
+    profile_updated = Signal(dict)
+    scope_updated = Signal(dict)
 
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)
@@ -110,6 +114,8 @@ class Backend(QObject):
             return False
         self._client = LocalShareClient(self._runtime.base_url)
         self._start_chat_socket()
+        self.refresh_profile()
+        self.refresh_scope()
         logger.info("后台服务已就绪，端口 %s", self._runtime.port)
         return True
 
@@ -123,6 +129,10 @@ class Backend(QObject):
             on_deleted=self.chat_deleted.emit,
             on_status=self.chat_status.emit,
             on_shutdown=lambda _reason: self.chat_status.emit("offline"),
+            on_bulk_deleted=self.chat_bulk_deleted.emit,
+            on_edited=self.chat_edited.emit,
+            on_profile=self.profile_updated.emit,
+            on_scope=self.scope_updated.emit,
         )
         self._chat_client = chat_client
         try:
@@ -188,6 +198,85 @@ class Backend(QObject):
             return
         if isinstance(info, dict):
             self.room_updated.emit(info)
+
+    # ------------------------------------------------------------ profile/scope
+    def refresh_profile(self) -> None:
+        client = self._client
+        if client is None or not self._runtime.is_running:
+            return
+        try:
+            self._runtime.submit(client.profile(), callback=self._on_profile)
+        except RuntimeError:
+            return
+
+    def _on_profile(self, future: Future[Any]) -> None:
+        try:
+            profile = future.result()
+        except Exception:
+            return
+        if isinstance(profile, dict):
+            self.profile_updated.emit(profile)
+
+    def rename_profile(self, name: str, *, quiet: bool = False) -> None:
+        client = self._client
+        if client is None or not self._runtime.is_running:
+            if not quiet:
+                self.chat_error.emit("服务未运行，无法修改用户名")
+            return
+
+        def _done(future: Future[Any]) -> None:
+            try:
+                payload = future.result()
+            except Exception as exc:
+                logger.warning("修改用户名失败: %s", exc)
+                if not quiet:
+                    self.chat_error.emit(f"修改用户名失败：{exc}")
+                return
+            if isinstance(payload, dict):
+                self.profile_updated.emit(payload)
+
+        try:
+            self._runtime.submit(client.rename_profile(name), callback=_done)
+        except RuntimeError as exc:
+            if not quiet:
+                self.chat_error.emit(str(exc))
+
+    def refresh_scope(self) -> None:
+        client = self._client
+        if client is None or not self._runtime.is_running:
+            return
+        try:
+            self._runtime.submit(client.network_scope(), callback=self._on_scope)
+        except RuntimeError:
+            return
+
+    def _on_scope(self, future: Future[Any]) -> None:
+        try:
+            payload = future.result()
+        except Exception:
+            return
+        if isinstance(payload, dict):
+            self.scope_updated.emit(payload)
+
+    def apply_network_scope(self, scope: str) -> None:
+        client = self._client
+        if client is None or not self._runtime.is_running:
+            self.operation_failed.emit("服务未运行，无法修改开放网段")
+            return
+        try:
+            self._runtime.submit(client.set_network_scope(scope), callback=self._on_scope_applied)
+        except RuntimeError as exc:
+            self.operation_failed.emit(str(exc))
+
+    def _on_scope_applied(self, future: Future[Any]) -> None:
+        try:
+            payload = future.result()
+        except Exception as exc:
+            logger.warning("修改开放网段失败: %s", exc)
+            self.operation_failed.emit(f"修改开放网段失败：{exc}")
+            return
+        if isinstance(payload, dict):
+            self.scope_updated.emit(payload)
 
     # ----------------------------------------------------------------- upload
     def upload_paths(self, paths: list[Path]) -> None:
@@ -443,6 +532,50 @@ class Backend(QObject):
             self.chat_error.emit(f"删除失败：{exc}")
             return
         self.chat_deleted.emit(message_id)
+
+    def edit_chat(self, message_id: str, text: str) -> None:
+        client = self._client
+        if client is None or not self._runtime.is_running:
+            self.chat_error.emit("服务未运行，无法编辑消息")
+            return
+        if not message_id:
+            return
+
+        def _done(future: Future[Any]) -> None:
+            try:
+                message = future.result()
+            except Exception as exc:
+                logger.warning("编辑文本失败: %s", exc)
+                self.chat_error.emit(f"编辑失败：{exc}")
+                return
+            if isinstance(message, dict):
+                self.chat_edited.emit(message)
+
+        try:
+            self._runtime.submit(client.edit_chat(message_id, text), callback=_done)
+        except RuntimeError as exc:
+            self.chat_error.emit(str(exc))
+
+    def delete_chat_messages(self, message_ids: list[str]) -> None:
+        client = self._client
+        if client is None or not self._runtime.is_running:
+            self.chat_error.emit("服务未运行，无法删除消息")
+            return
+
+        def _done(future: Future[Any]) -> None:
+            try:
+                deleted = future.result()
+            except Exception as exc:
+                logger.warning("批量删除文本失败: %s", exc)
+                self.chat_error.emit(f"批量删除失败：{exc}")
+                return
+            if isinstance(deleted, list):
+                self.chat_bulk_deleted.emit(deleted)
+
+        try:
+            self._runtime.submit(client.delete_chat_messages(message_ids), callback=_done)
+        except RuntimeError as exc:
+            self.chat_error.emit(str(exc))
 
     def refresh_chat(self) -> None:
         client = self._client

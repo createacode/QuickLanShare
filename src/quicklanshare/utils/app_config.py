@@ -16,6 +16,7 @@ from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 from typing import Any
 
+from ..services.access import normalize_scope
 from .paths import ensure_directory, local_appdata_dir
 
 SCHEMA_VERSION = 1
@@ -84,13 +85,14 @@ class ServerSettings:
     auto_shutdown_enabled: bool = True
     auto_shutdown_hours: float = 24.0
     open_browser: bool = False
-    ip_scope: str = "last1"
+    ip_scope: str = "all"
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> ServerSettings:
         default = cls()
-        scope = _safe_str(raw.get("ip_scope"), default.ip_scope)
+        scope = normalize_scope(_safe_str(raw.get("ip_scope"), default.ip_scope))
         if scope not in IP_SCOPES:
+            # 旧版任意段组合无法映射到四档滑块，统一回退到“全部开放”。
             scope = default.ip_scope
         return cls(
             host=_safe_str(raw.get("host"), default.host),
@@ -120,6 +122,7 @@ class UiSettings:
     autostart: bool = False
     autostart_silent: bool = False
     download_dir: str = ""
+    share_name: str = ""
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> UiSettings:
@@ -142,6 +145,7 @@ class UiSettings:
             autostart=_safe_bool(raw.get("autostart"), default.autostart),
             autostart_silent=_safe_bool(raw.get("autostart_silent"), default.autostart_silent),
             download_dir=_safe_str(raw.get("download_dir"), "").strip(),
+            share_name=_safe_str(raw.get("share_name"), "").strip()[:20],
         )
 
 

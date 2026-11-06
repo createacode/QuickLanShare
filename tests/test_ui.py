@@ -10,7 +10,9 @@ from PySide6.QtWidgets import QApplication, QCheckBox, QDialog, QLabel, QPushBut
 from quicklanshare.core.version import window_title
 from quicklanshare.ui import theme
 from quicklanshare.ui.main_window import MainWindow
+from quicklanshare.ui.scope_control import NetworkScopeControl
 from quicklanshare.ui.settings_dialog import SettingsDialog
+from quicklanshare.ui.text_panel import MessageBubble, TextPanel
 from quicklanshare.ui.widgets import FileTable
 from quicklanshare.utils.app_config import AppConfig
 from quicklanshare.utils.logging_setup import setup_logging
@@ -272,3 +274,129 @@ def test_main_window_download_state_filter_and_qr(tmp_path: Path, qtbot) -> None
         window.backend.stop_server("test-stop")
     qtbot.waitUntil(lambda: not window.backend.is_running, timeout=5000)
     window.hide()
+
+
+def test_restart_button_and_scope_control(tmp_path: Path, qtbot) -> None:
+    window = make_window(tmp_path, qtbot)
+    assert window.restart_button.toolTip() == "重启服务"
+    assert not window.restart_button.isEnabled()
+    assert window.scope_control.scope == "all"
+    for scope in ("last1", "last2", "last3", "all"):
+        window.scope_control.set_scope(scope)
+        assert window.scope_control.scope == scope
+    window.show()
+    with qtbot.waitSignal(window.backend.started, timeout=20000):
+        window.start_server()
+    qtbot.waitUntil(lambda: window.restart_button.isEnabled(), timeout=5000)
+    window.scope_control.set_scope("last2")
+    window._on_scope_committed("last2")
+    assert window.app_config.server.ip_scope == "last2"
+    qtbot.waitUntil(
+        lambda: window.backend.config is not None and window.backend.config.ip_scope == "last2",
+        timeout=5000,
+    )
+    with qtbot.waitSignal(window.backend.stopped, timeout=15000):
+        window.backend.stop_server("test-stop")
+    qtbot.waitUntil(lambda: not window.backend.is_running, timeout=5000)
+    assert not window.restart_button.isEnabled()
+    assert window.scope_control.scope == "last2"
+    window.hide()
+
+
+def test_scope_control_saves_scope_without_starting(tmp_path: Path, qtbot) -> None:
+    window = make_window(tmp_path, qtbot)
+    window.scope_control.set_scope("last1")
+    window._on_scope_committed("last1")
+    assert not window.backend.is_running
+    assert window.app_config.server.ip_scope == "last1"
+    assert window.scope_control.scope == "last1"
+    window.hide()
+
+
+def test_scope_control_display_and_commit(tmp_path: Path, qtbot) -> None:
+    control = NetworkScopeControl()
+    qtbot.addWidget(control)
+    control.set_server_ip("192.168.1.10")
+    control.set_scope("last1")
+    assert control.current_display == "192.168.1.*"
+    control.set_scope("last2")
+    assert control.current_display == "192.168.*.*"
+    control.set_scope("last3")
+    assert control.current_display == "192.*.*.*"
+    control.set_scope("all")
+    assert control.current_display == "全部开放"
+    with qtbot.waitSignal(control.scopeCommitted, timeout=1000):
+        control._commit_position(2)
+    assert control.scope == "last1"
+    assert control.current_display == "192.168.1.*"
+    control.hide()
+
+
+def test_silent_start_suppresses_notifications(tmp_path: Path, qtbot) -> None:
+    window = make_window(tmp_path, qtbot)
+    window._start_hidden = True
+    with patch.object(window.toast, "show_message") as toast:
+        window._on_started(18888, "http://192.168.1.2:18888", 0)
+    assert toast.call_count == 0
+    window._start_hidden = False
+    with patch.object(window.toast, "show_message") as toast:
+        window._on_started(18889, "http://192.168.1.2:18889", 0)
+    assert toast.call_count == 1
+    window.hide()
+
+
+def test_message_bubble_copy_selection_and_ctrl_c(tmp_path: Path, qtbot) -> None:
+    bubble = MessageBubble(
+        {
+            "id": "m1",
+            "message": "复制这段文字",
+            "client_ip": "192.168.1.30",
+            "client_name": "同事",
+            "timestamp": 0,
+            "time_str": "2026-11-06 09:00:00",
+        }
+    )
+    qtbot.addWidget(bubble)
+    bubble.show()
+    bubble._text.setSelection(0, 2)
+    bubble.copy_text()
+    assert QApplication.clipboard().text() == "复制"
+
+    bubble._text.setSelection(0, 0)
+    bubble.setFocus()
+    QTest.keyClick(bubble, Qt.Key.Key_C, Qt.KeyboardModifier.ControlModifier)
+    assert QApplication.clipboard().text() == "复制这段文字"
+    bubble.hide()
+
+
+def test_text_panel_manage_and_edit_signals(tmp_path: Path, qtbot) -> None:
+    panel = TextPanel()
+    qtbot.addWidget(panel)
+    panel.set_service_available(True)
+    panel.set_history(
+        [
+            {
+                "id": "m1",
+                "message": "第一条",
+                "client_ip": "192.168.1.30",
+                "client_name": "同事",
+                "timestamp": 0,
+            },
+            {
+                "id": "m2",
+                "message": "第二条",
+                "client_ip": "192.168.1.30",
+                "client_name": "同事",
+                "timestamp": 0,
+            },
+        ]
+    )
+    panel.set_manage_mode(True)
+    assert panel.manage_mode
+    panel._select_all.setChecked(True)
+    assert panel._delete_selected_button.isEnabled()
+    assert len(panel._selected) == 2
+    panel.remove_messages(["m1", "m2"])
+    assert panel.message_count == 0
+    assert not panel.manage_mode
+    panel.hide()

@@ -25,6 +25,12 @@ class FileTransferApp {
         this.serverShuttingDown = false;
         this._largeNoticeTimer = null;
         this._largeNoticeInterval = null;
+        this.myName = '';
+        this.myIp = '';
+        this.localClient = false;
+        this.onlineUsers = [];
+        this.messageManageMode = false;
+        this.selectedMessages = new Set();
         this.loadDownloadedRecords();
         this.init();
     }
@@ -127,6 +133,11 @@ class FileTransferApp {
             document.getElementById('clientCount').textContent = data.total_clients || 0;
             document.getElementById('chatCount').textContent = data.chat_messages || 0;
             document.getElementById('fileCount').textContent = data.total_files || 0;
+            this.myIp = data.client_ip || '';
+            this.localClient = Boolean(data.local_client);
+            if (data.client_name) this.setMyName(data.client_name);
+            this.renderOnlineUsers(Array.isArray(data.online_users) ? data.online_users : []);
+            this.updateMessageEditPermissions();
             const version = document.getElementById('appVersion');
             if (version && data.version) version.textContent = `v${data.version}`;
             const copyright = document.getElementById('copyrightInfo');
@@ -167,6 +178,12 @@ class FileTransferApp {
                 this.addMessage(data.message, false);
             } else if (data.type === 'delete_message') {
                 this.deleteMessageLocally(data.message_id);
+            } else if (data.type === 'delete_messages') {
+                this.deleteMessagesLocally((data.message_ids || []).filter((id) => typeof id === 'string'));
+            } else if (data.type === 'edit_message') {
+                this.editMessageLocally(data.message);
+            } else if (data.type === 'profile_updated') {
+                this.applyProfileUpdate(data.ip, data.name);
             } else if (data.type === 'error') {
                 this.showMessage(data.error || '消息发送失败', 'error');
             } else if (data.type === 'server_shutdown') {
@@ -209,6 +226,7 @@ class FileTransferApp {
 
     addMessage(msg, isHistory = false) {
         if (!msg || !msg.id) return;
+        if (this.messages.some((item) => item.id === msg.id)) return;
         this.messages.push(msg);
         if (this.messages.length > 100) this.messages.shift();
         this.updateLatestMessage(msg);
@@ -244,15 +262,49 @@ class FileTransferApp {
         const clone = template.content.cloneNode(true);
         const item = clone.querySelector('.message-item');
         item.dataset.msgId = msg.id;
+        item.dataset.clientIp = msg.client_ip || '';
         item.querySelector('.message-sender').textContent = msg.client_name || '';
         item.querySelector('.message-time').textContent = msg.time_str || '';
         item.querySelector('.message-content').textContent = msg.message || '';
+        const checkbox = item.querySelector('.msg-select');
+        checkbox.checked = this.selectedMessages.has(msg.id);
+        checkbox.addEventListener('change', () => {
+            if (checkbox.checked) this.selectedMessages.add(msg.id);
+            else this.selectedMessages.delete(msg.id);
+            this.updateMessageManageState();
+        });
+        const editButton = item.querySelector('.btn-msg-edit');
+        editButton.style.display = this.canEditMessage(msg) ? '' : 'none';
+        editButton.addEventListener('click', (event) => {
+            event.stopPropagation();
+            this.startEditMessage(msg.id, item);
+        });
         item.querySelector('.btn-msg-delete').addEventListener('click', (event) => {
             event.stopPropagation();
             this.deleteMessageFromBackend(msg.id);
         });
         historyDiv.appendChild(item);
+        this.applyMessageManageMode(item);
         historyDiv.scrollTop = historyDiv.scrollHeight;
+    }
+
+    applyMessageManageMode(item) {
+        item.classList.toggle('managing', this.messageManageMode);
+        const checkbox = item.querySelector('.msg-select');
+        if (checkbox) checkbox.style.display = this.messageManageMode ? '' : 'none';
+    }
+
+    canEditMessage(msg) {
+        return this.localClient || (Boolean(this.myIp) && (msg.client_ip || '') === this.myIp);
+    }
+
+    updateMessageEditPermissions() {
+        document.querySelectorAll('.message-item').forEach((item) => {
+            const button = item.querySelector('.btn-msg-edit');
+            if (!button) return;
+            const allowed = this.localClient || (Boolean(this.myIp) && (item.dataset.clientIp || '') === this.myIp);
+            button.style.display = allowed ? '' : 'none';
+        });
     }
 
     refreshHistoryList() {
@@ -260,21 +312,88 @@ class FileTransferApp {
         historyDiv.innerHTML = '';
         if (this.messages.length === 0) {
             historyDiv.innerHTML = '<div class="empty-history">暂无消息历史</div>';
+            this.updateMessageManageState();
             return;
         }
         this.messages.forEach((msg) => this.addMessageToHistory(msg));
+        this.updateMessageManageState();
+    }
+
+    setMessageManageMode(enabled) {
+        this.messageManageMode = Boolean(enabled && this.messages.length);
+        const toolbar = document.getElementById('msgBatchToolbar');
+        const button = document.getElementById('manageMessagesBtn');
+        if (toolbar) toolbar.style.display = this.messageManageMode ? 'flex' : 'none';
+        if (button) {
+            button.innerHTML = this.messageManageMode
+                ? '<i class="fas fa-check"></i> 完成'
+                : '<i class="fas fa-tasks"></i> 管理';
+        }
+        if (!this.messageManageMode) this.selectedMessages.clear();
+        if (this.messageManageMode && !this.isHistoryVisible) {
+            this.isHistoryVisible = true;
+            document.getElementById('historyContent').classList.add('active');
+            const toggle = document.getElementById('toggleHistory');
+            toggle.classList.add('active');
+            toggle.innerHTML = '<i class="fas fa-chevron-up"></i>';
+            this.refreshHistoryList();
+        }
+        document.querySelectorAll('.message-item').forEach((item) => this.applyMessageManageMode(item));
+        this.updateMessageManageState();
+    }
+
+    toggleMessageManageMode() {
+        this.setMessageManageMode(!this.messageManageMode);
+    }
+
+    updateMessageManageState() {
+        const valid = new Set(this.messages.map((msg) => msg.id));
+        this.selectedMessages = new Set(Array.from(this.selectedMessages).filter((id) => valid.has(id)));
+        const count = this.selectedMessages.size;
+        const label = document.getElementById('msgSelectedCount');
+        if (label) label.textContent = `已选 ${count} 条`;
+        const deleteBtn = document.getElementById('batchDeleteMessagesBtn');
+        if (deleteBtn) deleteBtn.disabled = count === 0;
+        const selectAll = document.getElementById('msgSelectAll');
+        if (selectAll) {
+            selectAll.checked = count > 0 && count === this.messages.length;
+            selectAll.indeterminate = count > 0 && count < this.messages.length;
+        }
+        document.querySelectorAll('.message-item').forEach((item) => {
+            const checkbox = item.querySelector('.msg-select');
+            if (checkbox) checkbox.checked = this.selectedMessages.has(item.dataset.msgId);
+        });
     }
 
     deleteMessageLocally(msgId) {
-        this.messages = this.messages.filter((msg) => msg.id !== msgId);
-        const element = document.querySelector(`.message-item[data-msg-id="${CSS.escape(msgId)}"]`);
-        if (element) element.remove();
-        const latest = this.messages[this.messages.length - 1];
-        if (latest) this.updateLatestMessage(latest);
-        else document.getElementById('latestMessage').innerHTML = '<div class="message-placeholder">等待消息...</div>';
-        const counter = document.getElementById('chatCount');
-        const value = (parseInt(counter.textContent, 10) || 0) - 1;
-        counter.textContent = Math.max(0, value);
+        this.deleteMessagesLocally([msgId]);
+    }
+
+    deleteMessagesLocally(msgIds) {
+        const ids = new Set((msgIds || []).filter((id) => typeof id === 'string'));
+        if (ids.size === 0) return;
+        const before = this.messages.length;
+        this.messages = this.messages.filter((msg) => !ids.has(msg.id));
+        let removed = before - this.messages.length;
+        ids.forEach((id) => {
+            this.selectedMessages.delete(id);
+            const element = document.querySelector(`.message-item[data-msg-id="${CSS.escape(id)}"]`);
+            if (element) element.remove();
+        });
+        if (removed > 0) {
+            const latest = this.messages[this.messages.length - 1];
+            if (latest) this.updateLatestMessage(latest);
+            else document.getElementById('latestMessage').innerHTML = '<div class="message-placeholder">等待消息...</div>';
+            const counter = document.getElementById('chatCount');
+            const value = (parseInt(counter.textContent, 10) || 0) - removed;
+            counter.textContent = Math.max(0, value);
+        }
+        if (!this.messages.length) {
+            const historyDiv = document.getElementById('historyContent');
+            if (historyDiv) historyDiv.innerHTML = '<div class="empty-history">暂无消息历史</div>';
+            this.setMessageManageMode(false);
+        }
+        this.updateMessageManageState();
     }
 
     async deleteMessageFromBackend(msgId) {
@@ -284,6 +403,201 @@ class FileTransferApp {
             this.showMessage('消息已删除', 'success');
         } catch (e) {
             this.showMessage(e.message || '删除失败', 'error');
+        }
+    }
+
+    async batchDeleteMessages() {
+        const ids = Array.from(this.selectedMessages).filter((id) => this.messages.some((msg) => msg.id === id));
+        if (!ids.length) {
+            this.showMessage('请先选择要删除的消息', 'info');
+            return;
+        }
+        this.showConfirm(`确定删除选中的 ${ids.length} 条消息吗？删除后不可恢复。`, async () => {
+            try {
+                const result = await this.api('/api/chat/messages/delete', {
+                    method: 'POST',
+                    json: { ids },
+                });
+                const deleted = (result && result.deleted) || ids;
+                this.deleteMessagesLocally(deleted);
+                this.selectedMessages.clear();
+                this.updateMessageManageState();
+                this.showMessage(`已删除 ${deleted.length} 条消息`, 'success');
+            } catch (e) {
+                this.showMessage(e.message || '批量删除失败', 'error');
+            }
+        });
+    }
+
+    startEditMessage(msgId, item) {
+        if (!item || item.querySelector('.message-editor')) return;
+        const msg = this.messages.find((entry) => entry.id === msgId);
+        if (!msg) return;
+        const content = item.querySelector('.message-content');
+        if (!content) return;
+        const editor = document.createElement('div');
+        editor.className = 'message-editor';
+        const textarea = document.createElement('textarea');
+        textarea.className = 'message-edit-input';
+        textarea.maxLength = 500;
+        textarea.value = msg.message || '';
+        editor.appendChild(textarea);
+        const actions = document.createElement('div');
+        actions.className = 'message-edit-actions';
+        const save = document.createElement('button');
+        save.className = 'btn-primary';
+        save.textContent = '保存';
+        const cancel = document.createElement('button');
+        cancel.className = 'btn-secondary';
+        cancel.textContent = '取消';
+        actions.append(save, cancel);
+        editor.appendChild(actions);
+        content.replaceWith(editor);
+        textarea.focus();
+        textarea.setSelectionRange(textarea.value.length, textarea.value.length);
+        const close = () => {
+            editor.replaceWith(content);
+            content.textContent = msg.message || '';
+        };
+        cancel.addEventListener('click', close);
+        save.addEventListener('click', async () => {
+            const value = textarea.value.trim();
+            if (!value) {
+                this.showMessage('消息不能为空', 'error');
+                return;
+            }
+            save.disabled = true;
+            try {
+                const result = await this.api(`/api/chat/message/${encodeURIComponent(msgId)}`, {
+                    method: 'PUT',
+                    json: { message: value },
+                });
+                const updated = (result && result.message) || { ...msg, message: value };
+                this.editMessageLocally(updated);
+                this.refreshHistoryList();
+                this.showMessage('消息已更新', 'success');
+            } catch (e) {
+                save.disabled = false;
+                this.showMessage(e.message || '编辑失败', 'error');
+            }
+        });
+        textarea.addEventListener('keydown', (event) => {
+            if (event.key === 'Enter' && !event.shiftKey) {
+                event.preventDefault();
+                save.click();
+            } else if (event.key === 'Escape') {
+                event.preventDefault();
+                close();
+            }
+        });
+    }
+
+    editMessageLocally(msg) {
+        if (!msg || !msg.id) return;
+        const index = this.messages.findIndex((item) => item.id === msg.id);
+        if (index < 0) return;
+        this.messages[index] = { ...this.messages[index], ...msg };
+        const item = document.querySelector(`.message-item[data-msg-id="${CSS.escape(msg.id)}"]`);
+        if (item) {
+            item.querySelector('.message-sender').textContent = msg.client_name || '';
+            item.querySelector('.message-time').textContent = msg.time_str || '';
+            const content = item.querySelector('.message-content');
+            if (content) content.textContent = msg.message || '';
+        }
+        if (this.messages[this.messages.length - 1].id === msg.id) {
+            this.updateLatestMessage(this.messages[index]);
+        }
+    }
+
+    setMyName(name) {
+        this.myName = name || '用户';
+        const label = document.getElementById('myName');
+        if (label) label.textContent = this.myName;
+    }
+
+    applyProfileUpdate(ip, name) {
+        if (!name) return;
+        this.messages.forEach((msg) => {
+            if ((msg.client_ip || '') === (ip || '')) msg.client_name = name;
+        });
+        document.querySelectorAll('.message-item').forEach((item) => {
+            if ((item.dataset.clientIp || '') === (ip || '')) {
+                const sender = item.querySelector('.message-sender');
+                if (sender) sender.textContent = name;
+            }
+        });
+        if (ip && ip === this.myIp) this.setMyName(name);
+        const latest = this.messages[this.messages.length - 1];
+        if (latest && (latest.client_ip || '') === (ip || '')) {
+            const sender = document.querySelector('#latestMessage .latest-message-sender');
+            if (sender) sender.textContent = name;
+        }
+    }
+
+    renderOnlineUsers(users) {
+        this.onlineUsers = Array.isArray(users) ? users : [];
+        document.getElementById('clientCount').textContent = this.onlineUsers.length;
+        const list = document.getElementById('onlineUsersList');
+        if (!list) return;
+        if (!this.onlineUsers.length) {
+            list.innerHTML = '<div class="online-empty">暂无在线用户</div>';
+            return;
+        }
+        list.innerHTML = this.onlineUsers.map((user) => {
+            const status = user.status || '在线';
+            const icon = status === '上传' ? 'fa-upload' : (status === '下载' ? 'fa-download' : 'fa-circle');
+            const detail = user.detail ? `<span class="online-detail">${this.escapeHtml(user.detail)}</span>` : '';
+            return `
+                <div class="online-user">
+                    <span class="online-user-name"><i class="fas ${icon}"></i> ${this.escapeHtml(user.name || '访客')}</span>
+                    <span class="online-user-ip">${this.escapeHtml(user.ip || '')}</span>
+                    <span class="online-user-status status-${status === '上传' ? 'upload' : (status === '下载' ? 'download' : 'idle')}">${this.escapeHtml(status)}</span>
+                    ${detail}
+                </div>`;
+        }).join('');
+    }
+
+    toggleOnlinePopover() {
+        const popover = document.getElementById('onlinePopover');
+        if (!popover) return;
+        const visible = popover.style.display !== 'none';
+        popover.style.display = visible ? 'none' : 'block';
+        if (!visible) this.loadRoomInfo();
+    }
+
+    openRenameModal() {
+        const modal = document.getElementById('renameModal');
+        const input = document.getElementById('renameInput');
+        const error = document.getElementById('renameError');
+        if (!modal || !input) return;
+        input.value = this.myName || '';
+        if (error) error.textContent = '';
+        modal.style.display = 'flex';
+        input.focus();
+        input.select();
+    }
+
+    closeRenameModal() {
+        const modal = document.getElementById('renameModal');
+        if (modal) modal.style.display = 'none';
+    }
+
+    async saveRename() {
+        const input = document.getElementById('renameInput');
+        const error = document.getElementById('renameError');
+        const value = (input.value || '').trim();
+        if (!value) {
+            error.textContent = '用户名不能为空';
+            return;
+        }
+        try {
+            const data = await this.api('/api/profile/name', { method: 'POST', json: { name: value } });
+            this.applyProfileUpdate(data.ip, data.name);
+            this.setMyName(data.name);
+            this.closeRenameModal();
+            this.showMessage('用户名已更新', 'success');
+        } catch (e) {
+            error.textContent = e.message || '修改失败';
         }
     }
 
@@ -656,6 +970,12 @@ class FileTransferApp {
         const toggleSelectBtn = document.getElementById('toggleSelectBtn');
         const downloadZipBtn = document.getElementById('downloadZipBtn');
         const batchDeleteBtn = document.getElementById('batchDeleteBtn');
+        const onlineStat = document.getElementById('onlineStat');
+        const renameBtn = document.getElementById('renameBtn');
+        const manageMessagesBtn = document.getElementById('manageMessagesBtn');
+        const msgSelectAll = document.getElementById('msgSelectAll');
+        const finishMsgManageBtn = document.getElementById('finishMsgManageBtn');
+        const batchDeleteMessagesBtn = document.getElementById('batchDeleteMessagesBtn');
 
         zone.addEventListener('click', () => fileInput.click());
         fileInput.addEventListener('change', (event) => {
@@ -674,6 +994,12 @@ class FileTransferApp {
         });
         refreshBtn.addEventListener('click', () => this.loadFileList());
         sendBtn.addEventListener('click', () => this.sendText());
+        textInput.addEventListener('focus', () => {
+            if (this.isHistoryVisible) {
+                const content = document.getElementById('historyContent');
+                content.scrollTop = content.scrollHeight;
+            }
+        });
         textInput.addEventListener('keydown', (event) => {
             if (event.key === 'Enter' && !event.shiftKey) {
                 event.preventDefault();
@@ -699,6 +1025,40 @@ class FileTransferApp {
         toggleSelectBtn.addEventListener('click', () => this.toggleSelectAll());
         downloadZipBtn.addEventListener('click', () => this.downloadZip());
         batchDeleteBtn.addEventListener('click', () => this.batchDelete());
+        onlineStat.addEventListener('click', (event) => {
+            event.stopPropagation();
+            this.toggleOnlinePopover();
+        });
+        renameBtn.addEventListener('click', () => this.openRenameModal());
+        document.getElementById('renameCancelBtn').addEventListener('click', () => this.closeRenameModal());
+        document.getElementById('renameSaveBtn').addEventListener('click', () => this.saveRename());
+        document.getElementById('renameInput').addEventListener('keydown', (event) => {
+            if (event.key === 'Enter') {
+                event.preventDefault();
+                this.saveRename();
+            } else if (event.key === 'Escape') {
+                event.preventDefault();
+                this.closeRenameModal();
+            }
+        });
+        manageMessagesBtn.addEventListener('click', () => this.toggleMessageManageMode());
+        finishMsgManageBtn.addEventListener('click', () => this.setMessageManageMode(false));
+        batchDeleteMessagesBtn.addEventListener('click', () => this.batchDeleteMessages());
+        msgSelectAll.addEventListener('change', () => {
+            const checked = msgSelectAll.checked;
+            this.messages.forEach((msg) => {
+                if (checked) this.selectedMessages.add(msg.id);
+                else this.selectedMessages.delete(msg.id);
+            });
+            this.updateMessageManageState();
+        });
+        document.addEventListener('click', (event) => {
+            const popover = document.getElementById('onlinePopover');
+            if (!popover || popover.style.display === 'none') return;
+            if (!popover.contains(event.target) && event.target !== onlineStat && !onlineStat.contains(event.target)) {
+                popover.style.display = 'none';
+            }
+        });
         document.getElementById('closeLargeDownloadBtn').addEventListener('click', () => this.closeLargeDownloadNotice());
         document.getElementById('openDownloadsBtn').addEventListener('click', () => this.openDownloads());
         document.getElementById('copyDownloadsUrlBtn').addEventListener('click', () => this.copyToClipboard(this.getDownloadsInfo().downloads));

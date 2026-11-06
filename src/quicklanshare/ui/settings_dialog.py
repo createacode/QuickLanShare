@@ -132,7 +132,7 @@ class SettingsDialog(QDialog):
         layout.addWidget(server_group)
 
         access_group, access_layout = _group(
-            "访问控制", "按 IPv4 前几段限制哪些设备可以打开共享页面。"
+            "访问控制", "用四档滑块选择放通范围；服务运行时修改会立即生效。"
         )
         self.ip_scope_combo = QComboBox()
         self.ip_scope_combo.addItem("仅放通最后一位（同一网段）", "last1")
@@ -145,8 +145,8 @@ class SettingsDialog(QDialog):
             _row(
                 "IP 放通范围",
                 self.ip_scope_combo,
-                "例：本机 192.168.1.10，默认允许 192.168.1.x；本机 127.0.0.1 始终允许。"
-                "修改后需重启服务生效。",
+                "例：本机 192.168.1.10，可选 192.168.1.x / 192.168.x.x / 192.x.x.x / 全部。"
+                "顶部四档滑块与服务运行时修改都会立即生效；本机 127.0.0.1 始终允许。",
             )
         )
         layout.addWidget(access_group)

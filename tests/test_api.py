@@ -326,6 +326,84 @@ class ServerBehaviourTests(ServerTestCase):
         status, history = await self.get_json("/api/chat/history")
         self.assertEqual(len(history["messages"]), 1)
 
+    async def test_room_info_contains_online_users_and_scope(self):
+        status, data = await self.get_json("/api/room-info")
+        self.assertEqual(status, 200)
+        self.assertIn("online_users", data)
+        self.assertEqual(data["ip_scope"]["scope"], "all")
+        self.assertEqual(data["ip_scope"]["mask"], 0b1111)
+        self.assertEqual(data["ip_scope"]["segments"], [True, True, True, True])
+        self.assertEqual(data["client_name"], "用户1")
+        _status, profile = await self.get_json("/api/profile")
+        self.assertEqual(profile["ip"], "127.0.0.1")
+        self.assertEqual(profile["name"], "用户1")
+
+    async def test_network_scope_hot_update(self):
+        async with self.session.post(
+            self.base + "/api/network-scope", json={"scope": "last2"}
+        ) as response:
+            self.assertEqual(response.status, 200)
+            data = await response.json()
+        self.assertEqual(data["scope"], "last2")
+        self.assertEqual(data["segments"], [False, False, True, True])
+        _status, room = await self.get_json("/api/room-info")
+        self.assertEqual(room["ip_scope"]["scope"], "last2")
+        self.assertEqual(room["ip_scope"]["mask"], 0b1100)
+        async with self.session.post(
+            self.base + "/api/network-scope", json={"scope": "mask:5"}
+        ) as response:
+            self.assertEqual(response.status, 400)
+
+    async def test_rename_profile_refreshes_chat_author(self):
+        _status, created = await self.post_json("/api/chat/send", {"message": "旧名字"})
+        old_id = created["message"]["id"]
+        async with self.session.post(
+            self.base + "/api/profile/name", json={"name": "会议室平板"}
+        ) as response:
+            self.assertEqual(response.status, 200)
+            profile = await response.json()
+        self.assertEqual(profile["name"], "会议室平板")
+        _status, history = await self.get_json("/api/chat/history")
+        message = next(item for item in history["messages"] if item["id"] == old_id)
+        self.assertEqual(message["client_name"], "会议室平板")
+        _status, room = await self.get_json("/api/room-info")
+        self.assertEqual(room["client_name"], "会议室平板")
+
+    async def test_edit_and_batch_delete_chat_messages(self):
+        _status, first = await self.post_json("/api/chat/send", {"message": "第一条"})
+        _status, second = await self.post_json("/api/chat/send", {"message": "第二条"})
+        message_id = first["message"]["id"]
+        async with self.session.put(
+            self.base + f"/api/chat/message/{message_id}", json={"message": "已编辑"}
+        ) as response:
+            self.assertEqual(response.status, 200)
+            edited = (await response.json())["message"]
+        self.assertEqual(edited["message"], "已编辑")
+        _status, history = await self.get_json("/api/chat/history")
+        self.assertEqual(history["messages"][0]["message"], "已编辑")
+        async with self.session.post(
+            self.base + "/api/chat/messages/delete",
+            json={"ids": [message_id, second["message"]["id"]]},
+        ) as response:
+            self.assertEqual(response.status, 200)
+            deleted = (await response.json())["deleted"]
+        self.assertEqual(len(deleted), 2)
+        _status, history = await self.get_json("/api/chat/history")
+        self.assertEqual(history["messages"], [])
+
+    async def test_online_users_shows_upload_activity(self):
+        payload = b"x" * 16
+        _status, init = await self.post_json(
+            "/api/upload/init", {"filename": "active.bin", "size": len(payload)}
+        )
+        self.assertIn("upload_id", init)
+        _status, room = await self.get_json("/api/room-info")
+        user = next(item for item in room["online_users"] if item["ip"] == "127.0.0.1")
+        self.assertEqual(user["status"], "上传")
+        self.assertEqual(user["detail"], "active.bin")
+        async with self.session.delete(self.base + f"/api/upload/{init['upload_id']}") as response:
+            self.assertEqual(response.status, 200)
+
     async def test_websocket_chat_and_delete_broadcast(self):
         async with self.session.ws_connect(
             self.base + "/ws", headers={"Origin": self.base}
